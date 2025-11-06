@@ -11,7 +11,7 @@ const admin = require('firebase-admin');
 
 
 // Initialize Firebase Admin
-const serviceAccount = require('./ummahstar-d55c6-firebase-adminsdk-fbsvc-fb23702304.json');
+const serviceAccount = require('./ummahstar-d55c6-firebase-adminsdk-fbsvc-c99d00e887.json');
 
 admin.initializeApp({
   credential: admin.credential.cert(serviceAccount)
@@ -47,29 +47,42 @@ con.connect(function (err) {
   console.log("MySql Database Connected");
 });
 
-// --- Helper to send push notification ---
+// In your server code, update the push notification:
 async function sendPushToToken(token, title, body, data = {}) {
   if (!token) return console.log('⚠️ No FCM token provided');
 
   const message = {
     token,
     notification: { title, body },
-    data: Object.fromEntries(Object.entries(data).map(([k, v]) => [k, String(v)])),
+    data: {
+      ...Object.fromEntries(Object.entries(data).map(([k, v]) => [k, String(v)])),
+      // Add these for background call handling
+      'click_action': 'INCOMING_CALL_ACTION',
+      'priority': 'high',
+      'content-available': '1',
+      'sound': 'default'
+    },
     android: {
       priority: 'high',
       notification: {
         sound: 'default',
         channelId: 'calls',
+        clickAction: 'INCOMING_CALL_ACTION',
       },
     },
     apns: {
-      headers: { 'apns-priority': '10' },
+      headers: { 
+        'apns-priority': '10',
+        'apns-push-type': 'background',
+        'apns-topic': 'com.ummahstar' // Your app bundle ID
+      },
       payload: {
         aps: {
           alert: { title, body },
           sound: 'default',
           category: 'INCOMING_CALL',
           'content-available': 1,
+          'mutable-content': 1
         },
       },
     },
