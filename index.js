@@ -10,7 +10,8 @@ const { v4: uuidv4 } = require('uuid');
 const admin = require('firebase-admin');
 
 // Initialize Firebase Admin
-const serviceAccount = require('./ummahstar-d55c6-firebase-adminsdk-fbsvc-c99d00e887.json');
+const serviceAccount = require('./ummahstar-d55c6-firebase-adminsdk-fbsvc-bde58cb8ff.json');
+
 
 admin.initializeApp({
     credential: admin.credential.cert(serviceAccount),
@@ -316,7 +317,7 @@ io.on('connection', (socket) => {
         const existingUserIndex = activeUser.findIndex(
             (user) => user.id === userId
         );
-        console.log('data', data);
+        //console.log('data', data);
 
         if (existingUserIndex !== -1) {
             // Update existing user's socket ID
@@ -326,7 +327,7 @@ io.on('connection', (socket) => {
             activeUser.push({ id: userId, socketId: socket.id });
         }
 
-        console.log('online user', { id: userId, socketId: socket.id });
+        //console.log('online user', { id: userId, socketId: socket.id });
 
         // Emit to all clients including sender
         io.emit('receive_online_user', {
@@ -848,6 +849,8 @@ io.on('connection', (socket) => {
                 socket.emit('message_error', {
                     error: 'DB Error',
                     details: err,
+                    uuid: msg?.uuid || null,
+                    conversation_id: msg?.conversation_id || null,
                 });
                 return;
             }
@@ -856,6 +859,14 @@ io.on('connection', (socket) => {
                 '✅ Message saved, emitting to room:',
                 msg.conversation_id
             );
+
+            socket.emit('message_ack', {
+                uuid: savedMsg.uuid,
+                id: savedMsg.id,
+                conversation_id: savedMsg.conversation_id,
+                status: 'sent',
+                created_at: new Date().toISOString(),
+            });
 
             // Update conversation timestamp for proper ordering
             const updateConversationQuery = `
