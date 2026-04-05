@@ -78,6 +78,23 @@ function createMessageService({queryDb}) {
     return rows[0] || null;
   }
 
+  async function fetchConversationRecipients(conversationId, excludeUserId) {
+    return queryDb(
+      `
+        SELECT
+          u.id,
+          u.device_id
+        FROM conversation_participants cp
+        INNER JOIN users u ON u.id = cp.user_id
+        WHERE cp.conversation_id = ?
+          AND cp.user_id <> ?
+          AND u.device_id IS NOT NULL
+          AND u.device_id <> ''
+      `,
+      [conversationId, excludeUserId],
+    );
+  }
+
   async function updateConversationTimestamp(conversationId) {
     if (!conversationId) return;
 
@@ -135,6 +152,7 @@ function createMessageService({queryDb}) {
     saveMessage,
     saveMessageStatus,
     fetchMessageSender,
+    fetchConversationRecipients,
     updateConversationTimestamp,
     fetchMessageHistory,
   };

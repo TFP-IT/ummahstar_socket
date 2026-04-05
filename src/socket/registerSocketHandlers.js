@@ -5,6 +5,29 @@ function emitSocketError(socket, error, extra = {}) {
   });
 }
 
+function buildMessagePushBody(message) {
+  const messageType = String(message?.message_type || 'text').toLowerCase();
+  const rawContent = String(message?.encrypted_content || '').trim();
+
+  if (messageType === 'text' && rawContent) {
+    return rawContent.length > 120 ? `${rawContent.slice(0, 117)}...` : rawContent;
+  }
+
+  switch (messageType) {
+    case 'image':
+      return 'Sent you an image';
+    case 'audio':
+      return 'Sent you a voice message';
+    case 'video':
+      return 'Sent you a video';
+    case 'document':
+    case 'file':
+      return 'Sent you a file';
+    default:
+      return 'Sent you a message';
+  }
+}
+
 function registerSocketHandlers({io, socketState, services}) {
   const {
     getOnlineUser,
@@ -12,6 +35,8 @@ function registerSocketHandlers({io, socketState, services}) {
     getConnectedUsersPayload,
     setConnectedUser,
     setOnlineUser,
+    setActiveConversationView,
+    isUserActivelyViewingConversation,
     removeSocketReferences,
   } = socketState;
 
@@ -20,6 +45,7 @@ function registerSocketHandlers({io, socketState, services}) {
     messageService,
     uploadService,
     qnaService,
+    pushService,
   } = services;
 
   function emitOnlineUsers() {
@@ -58,6 +84,17 @@ function registerSocketHandlers({io, socketState, services}) {
       if (userId === null) return;
 
       emitOnlineUsers();
+    });
+
+    socket.on('chat_screen_presence', data => {
+      setActiveConversationView(
+        {
+          userId: data?.user_id,
+          conversationId: data?.conversation_id,
+          isActive: Boolean(data?.is_active),
+        },
+        socket.id,
+      );
     });
 
     socket.on('initiate_call', data => {
@@ -154,6 +191,51 @@ function registerSocketHandlers({io, socketState, services}) {
           ...savedMessage,
           created_at: new Date().toISOString(),
         });
+
+        try {
+          const recipients = await messageService.fetchConversationRecipients(
+            message.conversation_id,
+            message.user_id,
+          );
+          const senderName =
+            String(message?.sender_name || '').trim() || 'New message';
+          const pushBody = buildMessagePushBody(savedMessage);
+
+          await Promise.all(
+            recipients.map(async recipient => {
+              if (
+                isUserActivelyViewingConversation(
+                  recipient.id,
+                  message.conversation_id,
+                )
+              ) {
+                return;
+              }
+
+              await pushService.sendPushToToken(
+                recipient.device_id,
+                senderName,
+                pushBody,
+                {
+                  type: 'chat_message',
+                  conversation_id: message.conversation_id,
+                  sender_id: message.user_id,
+                  sender_name: senderName,
+                  message_id: savedMessage.id,
+                  message_type: savedMessage.message_type,
+                },
+                {
+                  channelId: 'promo-notifaiction',
+                  clickAction: 'CHAT_MESSAGE_ACTION',
+                  category: 'CHAT_MESSAGE',
+                  apnsPushType: 'alert',
+                },
+              );
+            }),
+          );
+        } catch (pushError) {
+          console.error('Failed to send chat message push:', pushError);
+        }
       } catch (error) {
         console.error('Failed to send message:', error);
         emitSocketError(socket, 'DB Error', {
@@ -279,10 +361,16 @@ function registerSocketHandlers({io, socketState, services}) {
     socket.on('disconnect', () => {
       console.log(`Socket disconnected: ${socket.id}`);
 
-      const {disconnectedConnectedUserId, disconnectedOnlineUserId} =
+      const {
+        disconnectedConnectedUserId,
+        disconnectedOnlineUserId,
+        disconnectedActiveConversationUserId,
+      } =
         removeSocketReferences(socket.id);
       const affectedUserId =
-        disconnectedOnlineUserId ?? disconnectedConnectedUserId;
+        disconnectedOnlineUserId ??
+        disconnectedConnectedUserId ??
+        disconnectedActiveConversationUserId;
 
       if (affectedUserId !== null && affectedUserId !== undefined) {
         callService.cleanupUserCalls(affectedUserId, 'disconnect');
