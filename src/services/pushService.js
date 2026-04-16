@@ -47,23 +47,19 @@ function createPushService({admin, firebaseReady}) {
     const apnsPushType = options.apnsPushType || 'background';
     const apnsPriority = options.apnsPriority || '10';
 
+    const isIncomingCall = data.type === 'incoming_call';
+
     const message = {
       token,
-      notification: {title, body},
       data: {
         ...normalizeDataPayload(data),
         click_action: clickAction,
         priority: 'high',
         'content-available': '1',
-        sound: 'default',
       },
       android: {
         priority: 'high',
-        notification: {
-          sound: 'default',
-          channelId,
-          clickAction,
-        },
+        ttl: 0, // Deliver immediately
       },
       apns: {
         headers: {
@@ -73,8 +69,6 @@ function createPushService({admin, firebaseReady}) {
         },
         payload: {
           aps: {
-            alert: {title, body},
-            sound: 'default',
             category,
             'content-available': 1,
             'mutable-content': 1,
@@ -82,6 +76,23 @@ function createPushService({admin, firebaseReady}) {
         },
       },
     };
+
+    // Only add notification block if NOT an incoming call
+    // Data-only messages wake up the app's background handler on Android more reliably for calls
+    if (!isIncomingCall) {
+      message.notification = {title, body};
+      message.android.notification = {
+        sound: 'default',
+        channelId,
+        clickAction,
+      };
+      message.apns.payload.aps.alert = {title, body};
+      message.apns.payload.aps.sound = 'default';
+      message.data.sound = 'default';
+    } else {
+      // For calls, set specific high priority flags
+      message.android.ttl = 0; // Deliver immediately
+    }
 
     try {
       const response = await admin.messaging().send(message);

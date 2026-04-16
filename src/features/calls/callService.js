@@ -369,6 +369,7 @@ function createCallService({io, queryDb, socketState, pushService}) {
         conversation_id: callInfo.conversation_id,
         caller_id: callInfo.caller_id,
         caller_name: callerName,
+        caller_avatar: callInfo.caller_info?.avatar || null,
         status: callInfo.status,
         timestamp: new Date().toISOString(),
       });
