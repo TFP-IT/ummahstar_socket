@@ -246,6 +246,49 @@ function registerSocketHandlers({io, socketState, services}) {
       }
     });
 
+    socket.on('mark_message_delivered', async data => {
+      const {messageId, conversationId, userId} = data;
+
+      if (!messageId || !conversationId || !userId) {
+        emitSocketError(socket, 'Missing messageId, userId, or conversationId');
+        return;
+      }
+
+      try {
+        await messageService.saveMessageStatus(messageId, userId, 'delivered');
+
+        socket.emit('delivered_confirmation', {
+          messageId,
+          conversationId,
+          userId,
+          status: 'delivered',
+        });
+
+        const message = await messageService.fetchMessageSender(messageId);
+        if (!message) return;
+
+        const sender = getOnlineUser(message.sender_id);
+        if (sender) {
+          io.to(sender.socketId).emit('message_status_update', {
+            messageId,
+            conversationId,
+            userId,
+            status: 'delivered',
+          });
+        }
+
+        io.to(conversationId).emit('message_status_update', {
+          messageId,
+          conversationId,
+          userId,
+          status: 'delivered',
+        });
+      } catch (error) {
+        console.error('Failed to mark message as delivered:', error);
+        emitSocketError(socket, 'Failed to mark message as delivered');
+      }
+    });
+
     socket.on('mark_message_read', async data => {
       const {messageId, conversationId, userId} = data;
 
