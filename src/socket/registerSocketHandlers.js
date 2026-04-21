@@ -10,7 +10,7 @@ function buildMessagePushBody(message) {
   const rawContent = String(message?.encrypted_content || '').trim();
 
   if (messageType === 'text' && rawContent) {
-    return rawContent.length > 120 ? `${rawContent.slice(0, 117)}...` : rawContent;
+    return 'Sent you a new message';
   }
 
   switch (messageType) {
