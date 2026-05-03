@@ -15,6 +15,8 @@ const {createMessageService} = require('./src/services/messageService');
 const {createUploadService} = require('./src/services/uploadService');
 const {createCallService} = require('./src/features/calls/callService');
 const {createQnaService} = require('./src/features/qna/qnaService');
+const {createLiveStreamService, createWorkers} = require('./src/features/liveStream/liveStreamService');
+const {createLiveStreamState} = require('./src/features/liveStream/liveStreamState');
 const {registerSocketHandlers} = require('./src/socket/registerSocketHandlers');
 
 const app = express();
@@ -51,6 +53,17 @@ services.callService = createCallService({
   queryDb,
   socketState,
   pushService: services.pushService,
+});
+
+// Boot mediasoup workers + live stream service (async — non-blocking startup)
+createWorkers().then(() => {
+  const liveStreamState = createLiveStreamState();
+  services.liveStreamService = createLiveStreamService({io, liveStreamState});
+  console.log('[LiveStream] mediasoup SFU ready');
+}).catch(err => {
+  console.error('[LiveStream] Failed to start mediasoup workers:', err);
+  // Server continues without live-stream; existing features unaffected
+  services.liveStreamService = null;
 });
 
 registerSocketHandlers({

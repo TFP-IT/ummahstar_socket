@@ -62,6 +62,9 @@ function registerSocketHandlers({io, socketState, services}) {
 
   io.on('connection', socket => {
     console.log(`Socket connected: ${socket.id}`);
+    
+    // Dynamically grab liveStreamService because it initializes asynchronously
+    const liveStreamService = services.liveStreamService;
 
     socket.on('join_sawal_jawab_room', roomId => {
       socket.join(roomId);
@@ -401,6 +404,78 @@ function registerSocketHandlers({io, socketState, services}) {
       await qnaService.handleQnaSendMessage(data);
     });
 
+    // ── Live Stream (mediasoup SFU) — all events are additive ─────────────
+    if (liveStreamService) {
+      // Track which userId this socket belongs to for live-stream cleanup
+      let liveStreamUserId = null;
+
+      socket.on('live_stream_create_room', (data, callback) => {
+        if (data && data.userId) liveStreamUserId = data.userId;
+        liveStreamService.handleCreateRoom(socket, data, callback);
+      });
+
+      socket.on('live_stream_join_room', (data, callback) => {
+        if (data && data.userId) liveStreamUserId = data.userId;
+        liveStreamService.handleJoinRoom(socket, data, callback);
+      });
+
+      socket.on('live_stream_leave_room', data => {
+        liveStreamService.handleLeaveRoom(socket, data);
+      });
+
+      socket.on('live_stream_create_transport', (data, callback) => {
+        liveStreamService.handleCreateTransport(socket, data, callback);
+      });
+
+      socket.on('live_stream_connect_transport', (data, callback) => {
+        liveStreamService.handleConnectTransport(socket, data, callback);
+      });
+
+      socket.on('live_stream_produce', (data, callback) => {
+        liveStreamService.handleProduce(socket, data, callback);
+      });
+
+      socket.on('live_stream_consume', (data, callback) => {
+        liveStreamService.handleConsume(socket, data, callback);
+      });
+
+      socket.on('live_stream_resume_consumer', (data, callback) => {
+        liveStreamService.handleResumeConsumer(socket, data, callback);
+      });
+
+      socket.on('live_stream_toggle_media', data => {
+        liveStreamService.handleToggleMedia(socket, data);
+      });
+
+      socket.on('live_stream_raise_hand', data => {
+        liveStreamService.handleRaiseHand(socket, data);
+      });
+
+      socket.on('live_stream_chat_message', data => {
+        liveStreamService.handleChatMessage(socket, data);
+      });
+
+      socket.on('live_stream_kick_participant', data => {
+        liveStreamService.handleKickParticipant(socket, data);
+      });
+
+      socket.on('live_stream_end_session', data => {
+        liveStreamService.handleEndSession(socket, data);
+      });
+
+      socket.on('live_stream_get_participants', (data, callback) => {
+        liveStreamService.handleGetParticipants(socket, data, callback);
+      });
+
+      // Store userId on socket for disconnect cleanup
+      socket.on('live_stream_register_user', ({userId}) => {
+        liveStreamUserId = userId;
+      });
+
+      // Expose getter for disconnect handler below
+      socket._liveStreamUserId = () => liveStreamUserId;
+    }
+
     socket.on('disconnect', () => {
       console.log(`Socket disconnected: ${socket.id}`);
 
@@ -417,6 +492,16 @@ function registerSocketHandlers({io, socketState, services}) {
 
       if (affectedUserId !== null && affectedUserId !== undefined) {
         callService.cleanupUserCalls(affectedUserId, 'disconnect');
+      }
+
+      // Clean up live-stream rooms on disconnect
+      if (liveStreamService) {
+        const lsUserId = typeof socket._liveStreamUserId === 'function'
+          ? socket._liveStreamUserId()
+          : affectedUserId;
+        if (lsUserId !== null && lsUserId !== undefined) {
+          liveStreamService.handleSocketDisconnect(socket, lsUserId);
+        }
       }
 
       emitConnectedUsers();
