@@ -62,6 +62,23 @@ const MEDIA_CODECS = [
   },
 ];
 
+// ─── TURN / ICE relay servers ────────────────────────────────────────────────
+// The client receives these in every create_transport response so it can
+// add them to the underlying RTCPeerConnection regardless of network type.
+const TURN_SERVERS = [
+  { urls: 'stun:stun.l.google.com:19302' },
+  { urls: 'stun:stun1.l.google.com:19302' },
+  {
+    urls: [
+      `turn:${process.env.TURN_HOST || 'pdf.mges.global'}:${process.env.TURN_PORT || 3478}?transport=udp`,
+      `turn:${process.env.TURN_HOST || 'pdf.mges.global'}:${process.env.TURN_PORT || 3478}?transport=tcp`,
+      `turns:${process.env.TURN_HOST || 'pdf.mges.global'}:${process.env.TURN_TLS_PORT || 5349}?transport=tcp`,
+    ],
+    username: process.env.TURN_USERNAME || 'videocall',
+    credential: process.env.TURN_CREDENTIAL || '12345678&12345678',
+  },
+];
+
 // WebRTC transport options
 const WEBRTC_TRANSPORT_OPTIONS = {
   listenInfos: [
@@ -79,9 +96,13 @@ const WEBRTC_TRANSPORT_OPTIONS = {
   enableUdp: true,
   enableTcp: true,
   preferUdp: true,
+  preferTcp: false,
   initialAvailableOutgoingBitrate: 1_000_000,
   minimumAvailableOutgoingBitrate: 600_000,
   maxSctpMessageSize: 262144,
+  // How long to wait (ms) for ICE consent before closing the transport.
+  // Default is 30 000 ms; lower it so failures are detected faster.
+  iceConsentTimeout: 20,
 };
 
 // ─── Worker pool ──────────────────────────────────────────────────────────────
@@ -253,18 +274,37 @@ function createLiveStreamService({io, liveStreamState}) {
 
       const transport = await room.router.createWebRtcTransport(WEBRTC_TRANSPORT_OPTIONS);
 
+      // Log ICE candidates so we can verify the announced IP is reachable
+      console.log(
+        `[LiveStream] ${direction} transport ${transport.id} ICE candidates:`,
+        transport.iceCandidates.map(c => `${c.protocol}:${c.ip}:${c.port}`).join(', '),
+      );
+
       transport.on('dtlsstatechange', dtlsState => {
+        console.log(`[LiveStream] Transport ${transport.id} dtlsState: ${dtlsState}`);
         if (dtlsState === 'closed') transport.close();
       });
 
+      transport.on('icestatechange', iceState => {
+        console.log(`[LiveStream] Transport ${transport.id} iceState: ${iceState}`);
+      });
+
+      // Set a bitrate limit so the server doesn't overload the connection
+      await transport.setMaxIncomingBitrate(1_500_000);
+
       addTransport(sessionId, userId, direction, transport);
 
+      // Return `id` (not just transportId) so mediasoup-client can consume
+      // the params without any field-name mapping on the client side.
+      // Also return TURN servers so the client adds them to its RTCPeerConnection.
       callback({
         success: true,
-        transportId: transport.id,
+        id: transport.id,           // ← mediasoup-client wants `id`
+        transportId: transport.id,  // ← keep for backward-compat
         iceParameters: transport.iceParameters,
         iceCandidates: transport.iceCandidates,
         dtlsParameters: transport.dtlsParameters,
+        iceServers: TURN_SERVERS,   // ← client passes these to RTCPeerConnection
       });
     } catch (error) {
       console.error('[LiveStream] handleCreateTransport error:', error);
