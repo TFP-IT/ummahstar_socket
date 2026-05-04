@@ -145,7 +145,7 @@ function getNextWorker() {
 }
 
 // ─── Service factory ──────────────────────────────────────────────────────────
-function createLiveStreamService({io, liveStreamState}) {
+function createLiveStreamService({io, liveStreamState, socketState, pushService, queryDb}) {
   const {
     createRoom,
     getRoom,
@@ -176,7 +176,9 @@ function createLiveStreamService({io, liveStreamState}) {
 
   // ── handle: host creates a new live-stream room ───────────────────────────
   async function handleCreateRoom(socket, data, callback) {
-    const {sessionId, userId, displayName, sessionType = 'halaqa'} = data;
+    const {sessionId, userId, displayName, remoteUserId, sessionType = 'halaqa'} = data;
+
+    console.log('remoteUserId', remoteUserId);
 
     try {
       if (hasRoom(sessionId)) {
@@ -199,6 +201,49 @@ function createLiveStreamService({io, liveStreamState}) {
       socket.join(sessionId);
 
       console.log(`[LiveStream] Room created: ${sessionId} by user ${userId}`);
+
+      if (sessionType === 'mashwara' && remoteUserId) {
+        if (socketState && pushService && queryDb) {
+          const recipient = socketState.getOnlineUser(remoteUserId) || socketState.getConnectedUser?.(remoteUserId);
+          if (recipient) {
+            // User is online, notify them via socket
+            io.to(recipient.socketId).emit('incoming_mashwara_call', {
+              sessionId,
+              caller_id: userId,
+              caller_name: displayName,
+              timestamp: new Date().toISOString(),
+            });
+            console.log(`[LiveStream] Sent incoming_mashwara_call via socket to ${remoteUserId}`);
+          } else {
+            // User is offline, send FCM push notification
+            try {
+              const rows = await queryDb(
+                `SELECT device_id FROM users WHERE id = ? LIMIT 1`,
+                [remoteUserId]
+              );
+              if (rows && rows[0] && rows[0].device_id) {
+                await pushService.sendPushToToken(
+                  rows[0].device_id,
+                  'Incoming Mashwara Call',
+                  `${displayName || 'Someone'} is calling you for Mashwara`,
+                  {
+                    type: 'incoming_mashwara_call',
+                    sessionId,
+                    caller_id: userId,
+                    caller_name: displayName || 'Someone',
+                    timestamp: new Date().toISOString(),
+                  }
+                );
+                console.log(`[LiveStream] Sent incoming_mashwara_call push to ${remoteUserId}`);
+              } else {
+                console.log(`[LiveStream] Could not find device_id for ${remoteUserId}`);
+              }
+            } catch (err) {
+              console.error('[LiveStream] Error sending push for mashwara:', err);
+            }
+          }
+        }
+      }
 
       callback({
         success: true,

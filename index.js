@@ -58,7 +58,13 @@ services.callService = createCallService({
 // Boot mediasoup workers + live stream service (async — non-blocking startup)
 createWorkers().then(() => {
   const liveStreamState = createLiveStreamState();
-  services.liveStreamService = createLiveStreamService({io, liveStreamState});
+  services.liveStreamService = createLiveStreamService({
+    io, 
+    liveStreamState,
+    socketState,
+    pushService: services.pushService,
+    queryDb
+  });
   console.log('[LiveStream] mediasoup SFU ready');
 }).catch(err => {
   console.error('[LiveStream] Failed to start mediasoup workers:', err);

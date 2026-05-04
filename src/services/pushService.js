@@ -79,7 +79,7 @@ function createPushService({admin, firebaseReady}) {
 
     // Only add notification block if NOT an incoming call or chat message
     // Data-only messages wake up the app's background handler on Android more reliably for calls and native chat intercept
-    const interceptNatively = isIncomingCall || data.type === 'chat_message';
+    const interceptNatively = isIncomingCall || data.type === 'incoming_mashwara_call' || data.type === 'chat_message';
     if (!interceptNatively) {
       message.notification = {title, body};
       message.android.notification = {

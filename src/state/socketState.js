@@ -31,6 +31,14 @@ function createSocketState() {
     return socketId ? {id: normalizedUserId, socketId} : null;
   }
 
+  function getConnectedUser(userId) {
+    const normalizedUserId = toNumericId(userId);
+    if (normalizedUserId === null) return null;
+
+    const socketId = connectedUsers.get(normalizedUserId);
+    return socketId ? {id: normalizedUserId, socketId} : null;
+  }
+
   function setConnectedUser(user, socketId) {
     const normalizedUserId = toNumericId(user?.id ?? user);
     if (normalizedUserId === null) return null;
@@ -126,6 +134,7 @@ function createSocketState() {
     getConnectedUsersPayload,
     getOnlineUsersPayload,
     getOnlineUser,
+    getConnectedUser,
     setConnectedUser,
     setOnlineUser,
     setActiveConversationView,
