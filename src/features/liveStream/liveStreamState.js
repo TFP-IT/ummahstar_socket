@@ -57,7 +57,7 @@ function createLiveStreamState() {
     room.transports.forEach(({transport}) => {
       try { transport.close(); } catch (_) {}
     });
-    try { room.router.close(); } catch (_) {}
+    try { if (room.router) room.router.close(); } catch (_) {}
 
     rooms.delete(sessionId);
   }

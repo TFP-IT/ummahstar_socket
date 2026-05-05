@@ -189,8 +189,11 @@ function createLiveStreamService({io, liveStreamState, socketState, pushService,
         });
       }
 
-      const worker = getNextWorker();
-      const router = await worker.createRouter({mediaCodecs: MEDIA_CODECS});
+      let router = null;
+      if (sessionType !== 'mashwara') {
+        const worker = getNextWorker();
+        router = await worker.createRouter({mediaCodecs: MEDIA_CODECS});
+      }
 
       createRoom(sessionId, userId, router);
       addParticipant(sessionId, userId, {
@@ -248,7 +251,7 @@ function createLiveStreamService({io, liveStreamState, socketState, pushService,
       callback({
         success: true,
         sessionId,
-        rtpCapabilities: router.rtpCapabilities,
+        rtpCapabilities: router ? router.rtpCapabilities : null,
         sessionType,
       });
     } catch (error) {
@@ -295,7 +298,7 @@ function createLiveStreamService({io, liveStreamState, socketState, pushService,
       callback({
         success: true,
         sessionId,
-        rtpCapabilities: room.router.rtpCapabilities,
+        rtpCapabilities: room.router ? room.router.rtpCapabilities : null,
         participants: getRoomParticipantList(sessionId),
         existingProducers,
         chatHistory: room.chatMessages.slice(-50),
@@ -691,6 +694,14 @@ function createLiveStreamService({io, liveStreamState, socketState, pushService,
     });
   }
 
+  function handleSignal(socket, data) {
+    const {sessionId} = data;
+    if (!sessionId) return;
+
+    // Relay to other participants in the room
+    socket.to(sessionId).emit('live_stream_signal', data);
+  }
+
   return {
     createWorkers,
     handleCreateRoom,
@@ -708,6 +719,7 @@ function createLiveStreamService({io, liveStreamState, socketState, pushService,
     handleEndSession,
     handleGetParticipants,
     handleDeclineCall,
+    handleSignal,
     handleSocketDisconnect,
   };
 }
