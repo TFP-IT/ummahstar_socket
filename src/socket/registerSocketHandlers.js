@@ -467,6 +467,10 @@ function registerSocketHandlers({io, socketState, services}) {
         liveStreamService.handleGetParticipants(socket, data, callback);
       });
 
+      socket.on('live_stream_decline_call', data => {
+        liveStreamService.handleDeclineCall(socket, data);
+      });
+
       // Store userId on socket for disconnect cleanup
       socket.on('live_stream_register_user', ({userId}) => {
         liveStreamUserId = userId;

@@ -612,6 +612,24 @@ function createLiveStreamService({io, liveStreamState, socketState, pushService,
     });
   }
 
+  function handleDeclineCall(socket, data) {
+    const { sessionId, caller_id, recipient_id } = data;
+    const room = getRoom(sessionId);
+    if (!room) return;
+
+    // Notify everyone in the room (i.e. the host) that it was declined
+    broadcastToRoom(sessionId, 'live_stream_session_ended', {
+      sessionId,
+      endedBy: String(recipient_id),
+      reason: 'declined',
+    });
+
+    // End the room completely
+    deleteRoom(sessionId);
+    io.socketsLeave(sessionId);
+    console.log(`[LiveStream] Session ${sessionId} ended because participant declined`);
+  }
+
   // ── internal: clean up when participant disconnects ───────────────────────
   function _participantCleanup(socket, sessionId, userId, reason = 'left') {
     if (!sessionId || !userId) return;
@@ -689,6 +707,7 @@ function createLiveStreamService({io, liveStreamState, socketState, pushService,
     handleLeaveRoom,
     handleEndSession,
     handleGetParticipants,
+    handleDeclineCall,
     handleSocketDisconnect,
   };
 }
