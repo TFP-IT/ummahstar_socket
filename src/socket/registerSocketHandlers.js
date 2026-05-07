@@ -42,6 +42,7 @@ function registerSocketHandlers({io, socketState, services}) {
 
   const {
     callService,
+    mashwaraService,
     messageService,
     uploadService,
     qnaService,
@@ -65,6 +66,7 @@ function registerSocketHandlers({io, socketState, services}) {
     
     // Dynamically grab liveStreamService because it initializes asynchronously
     const liveStreamService = services.liveStreamService;
+    let mashwaraUserId = null;
 
     socket.on('join_sawal_jawab_room', roomId => {
       socket.join(roomId);
@@ -404,6 +406,46 @@ function registerSocketHandlers({io, socketState, services}) {
       await qnaService.handleQnaSendMessage(data);
     });
 
+    if (mashwaraService) {
+      socket.on('mashwara_create_room', (data, callback) => {
+        if (data && data.userId) mashwaraUserId = data.userId;
+        mashwaraService.handleCreateRoom(socket, data, callback);
+      });
+
+      socket.on('mashwara_join_room', (data, callback) => {
+        if (data && data.userId) mashwaraUserId = data.userId;
+        mashwaraService.handleJoinRoom(socket, data, callback);
+      });
+
+      socket.on('mashwara_leave_room', data => {
+        mashwaraService.handleLeaveRoom(socket, data);
+      });
+
+      socket.on('mashwara_toggle_media', data => {
+        mashwaraService.handleToggleMedia(socket, data);
+      });
+
+      socket.on('mashwara_signal', data => {
+        mashwaraService.handleSignal(socket, data);
+      });
+
+      socket.on('mashwara_end_session', data => {
+        mashwaraService.handleEndSession(socket, data);
+      });
+
+      socket.on('mashwara_decline_call', data => {
+        mashwaraService.handleDeclineCall(socket, data);
+      });
+
+      socket.on('mashwara_get_participants', (data, callback) => {
+        mashwaraService.handleGetParticipants(socket, data, callback);
+      });
+
+      socket.on('mashwara_register_user', ({userId}) => {
+        mashwaraUserId = userId;
+      });
+    }
+
     // ── Live Stream (mediasoup SFU) — all events are additive ─────────────
     if (liveStreamService) {
       // Track which userId this socket belongs to for live-stream cleanup
@@ -500,6 +542,13 @@ function registerSocketHandlers({io, socketState, services}) {
 
       if (affectedUserId !== null && affectedUserId !== undefined) {
         callService.cleanupUserCalls(affectedUserId, 'disconnect');
+      }
+
+      if (mashwaraService) {
+        const resolvedMashwaraUserId = mashwaraUserId ?? affectedUserId;
+        if (resolvedMashwaraUserId !== null && resolvedMashwaraUserId !== undefined) {
+          mashwaraService.handleSocketDisconnect(socket, resolvedMashwaraUserId);
+        }
       }
 
       // Clean up live-stream rooms on disconnect

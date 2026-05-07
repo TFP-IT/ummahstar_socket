@@ -15,6 +15,8 @@ const {createMessageService} = require('./src/services/messageService');
 const {createUploadService} = require('./src/services/uploadService');
 const {createCallService} = require('./src/features/calls/callService');
 const {createQnaService} = require('./src/features/qna/qnaService');
+const {createMashwaraService} = require('./src/features/mashwara/mashwaraService');
+const {createMashwaraState} = require('./src/features/mashwara/mashwaraState');
 const {createLiveStreamService, createWorkers} = require('./src/features/liveStream/liveStreamService');
 const {createLiveStreamState} = require('./src/features/liveStream/liveStreamState');
 const {registerSocketHandlers} = require('./src/socket/registerSocketHandlers');
@@ -53,6 +55,15 @@ services.callService = createCallService({
   queryDb,
   socketState,
   pushService: services.pushService,
+});
+
+const mashwaraState = createMashwaraState();
+services.mashwaraService = createMashwaraService({
+  io,
+  mashwaraState,
+  socketState,
+  pushService: services.pushService,
+  queryDb,
 });
 
 // Boot mediasoup workers + live stream service (async — non-blocking startup)

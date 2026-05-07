@@ -174,6 +174,23 @@ function createLiveStreamService({io, liveStreamState, socketState, pushService,
     }
   }
 
+  function getParticipantSocketIds(room, excludeUserId = null) {
+    if (!room) {
+      return [];
+    }
+
+    return Array.from(room.participants.values())
+      .filter(participant => {
+        if (excludeUserId === null || excludeUserId === undefined) {
+          return true;
+        }
+
+        return String(participant.userId) !== String(excludeUserId);
+      })
+      .map(participant => participant.socketId)
+      .filter(Boolean);
+  }
+
   // ── handle: host creates a new live-stream room ───────────────────────────
   async function handleCreateRoom(socket, data, callback) {
     const {sessionId, userId, displayName, remoteUserId, sessionType = 'halaqa'} = data;
@@ -195,7 +212,10 @@ function createLiveStreamService({io, liveStreamState, socketState, pushService,
         router = await worker.createRouter({mediaCodecs: MEDIA_CODECS});
       }
 
-      createRoom(sessionId, userId, router);
+      createRoom(sessionId, userId, router, {
+        sessionType,
+        remoteUserId,
+      });
       addParticipant(sessionId, userId, {
         socketId: socket.id,
         displayName: displayName || 'Host',
@@ -270,6 +290,29 @@ function createLiveStreamService({io, liveStreamState, socketState, pushService,
         return callback({success: false, error: 'Session not found. It may have ended.'});
       }
 
+      const normalizedUserId = String(userId);
+      const isExistingParticipant = room.participants.has(normalizedUserId);
+      const isMashwaraRoom = room.sessionType === 'mashwara';
+
+      if (
+        isMashwaraRoom &&
+        room.remoteUserId &&
+        String(room.hostUserId) !== normalizedUserId &&
+        String(room.remoteUserId) !== normalizedUserId
+      ) {
+        return callback({
+          success: false,
+          error: 'This Mashwara session is reserved for a different participant',
+        });
+      }
+
+      if (isMashwaraRoom && !isExistingParticipant && room.participants.size >= 2) {
+        return callback({
+          success: false,
+          error: 'Mashwara session already has two participants',
+        });
+      }
+
       addParticipant(sessionId, userId, {
         socketId: socket.id,
         displayName: displayName || 'Viewer',
@@ -299,6 +342,7 @@ function createLiveStreamService({io, liveStreamState, socketState, pushService,
         success: true,
         sessionId,
         rtpCapabilities: room.router ? room.router.rtpCapabilities : null,
+        sessionType: room.sessionType,
         participants: getRoomParticipantList(sessionId),
         existingProducers,
         chatHistory: room.chatMessages.slice(-50),
@@ -591,6 +635,7 @@ function createLiveStreamService({io, liveStreamState, socketState, pushService,
     broadcastToRoom(sessionId, 'live_stream_session_ended', {
       sessionId,
       endedBy: String(hostUserId),
+      sessionType: room.sessionType,
       timestamp: new Date().toISOString(),
     });
 
@@ -612,6 +657,7 @@ function createLiveStreamService({io, liveStreamState, socketState, pushService,
       success: true,
       participants: getRoomParticipantList(sessionId),
       hostUserId: String(room.hostUserId),
+      sessionType: room.sessionType,
     });
   }
 
@@ -625,6 +671,7 @@ function createLiveStreamService({io, liveStreamState, socketState, pushService,
       sessionId,
       endedBy: String(recipient_id),
       reason: 'declined',
+      sessionType: room.sessionType,
     });
 
     // End the room completely
@@ -651,6 +698,7 @@ function createLiveStreamService({io, liveStreamState, socketState, pushService,
         sessionId,
         endedBy: String(userId),
         reason: 'host_left',
+        sessionType: room.sessionType,
         timestamp: new Date().toISOString(),
       });
       deleteRoom(sessionId);
@@ -661,6 +709,7 @@ function createLiveStreamService({io, liveStreamState, socketState, pushService,
         sessionId,
         userId: String(userId),
         reason,
+        sessionType: room.sessionType,
         participants: getRoomParticipantList(sessionId),
         timestamp: new Date().toISOString(),
       });
@@ -697,6 +746,17 @@ function createLiveStreamService({io, liveStreamState, socketState, pushService,
   function handleSignal(socket, data) {
     const {sessionId} = data;
     if (!sessionId) return;
+
+    const room = getRoom(sessionId);
+    if (!room) return;
+
+    if (room.sessionType === 'mashwara') {
+      const targetSocketIds = getParticipantSocketIds(room, data?.senderId);
+      targetSocketIds.forEach(socketId => {
+        io.to(socketId).emit('live_stream_signal', data);
+      });
+      return;
+    }
 
     // Relay to other participants in the room
     socket.to(sessionId).emit('live_stream_signal', data);

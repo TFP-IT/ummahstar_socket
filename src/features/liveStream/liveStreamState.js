@@ -7,6 +7,8 @@
  *   sessionId  : string,
  *   router     : mediasoup.Router,
  *   hostUserId : number,
+ *   sessionType: string,
+ *   remoteUserId: string|null,
  *   transports : Map<transportId, {transport, userId, direction}>,
  *   producers  : Map<producerId, {producer, userId, kind}>,
  *   consumers  : Map<consumerId, {consumer, userId, producerId}>,
@@ -19,11 +21,13 @@ function createLiveStreamState() {
   // sessionId → room object
   const rooms = new Map();
 
-  function createRoom(sessionId, hostUserId, router) {
+  function createRoom(sessionId, hostUserId, router, meta = {}) {
     const room = {
       sessionId,
       router,
       hostUserId,
+      sessionType: meta.sessionType || 'halaqa',
+      remoteUserId: meta.remoteUserId ? String(meta.remoteUserId) : null,
       transports: new Map(),
       producers: new Map(),
       consumers: new Map(),
@@ -182,6 +186,8 @@ function createLiveStreamState() {
     return Array.from(rooms.entries()).map(([sessionId, room]) => ({
       sessionId,
       hostUserId: room.hostUserId,
+      sessionType: room.sessionType,
+      remoteUserId: room.remoteUserId,
       participantCount: room.participants.size,
       producerCount: room.producers.size,
       startedAt: room.startedAt,
