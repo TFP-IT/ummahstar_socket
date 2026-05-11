@@ -408,12 +408,18 @@ function registerSocketHandlers({io, socketState, services}) {
 
     if (mashwaraService) {
       socket.on('mashwara_create_room', (data, callback) => {
-        if (data && data.userId) mashwaraUserId = data.userId;
+        if (data && data.userId) {
+          mashwaraUserId = data.userId;
+          setOnlineUser(data.userId, socket.id);
+        }
         mashwaraService.handleCreateRoom(socket, data, callback);
       });
 
       socket.on('mashwara_join_room', (data, callback) => {
-        if (data && data.userId) mashwaraUserId = data.userId;
+        if (data && data.userId) {
+          mashwaraUserId = data.userId;
+          setOnlineUser(data.userId, socket.id);
+        }
         mashwaraService.handleJoinRoom(socket, data, callback);
       });
 
@@ -443,6 +449,10 @@ function registerSocketHandlers({io, socketState, services}) {
 
       socket.on('mashwara_register_user', ({userId}) => {
         mashwaraUserId = userId;
+        const normalizedUserId = setOnlineUser(userId, socket.id);
+        if (normalizedUserId !== null) {
+          emitOnlineUsers();
+        }
       });
     }
 
