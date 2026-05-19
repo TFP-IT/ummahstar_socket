@@ -1,4 +1,17 @@
 function createMashwaraService({io, mashwaraState, socketState, pushService, queryDb}) {
+  // Tracks pending session-teardown timers keyed by sessionId.
+  // When a participant disconnects unexpectedly we wait RECONNECT_GRACE_MS
+  // before firing mashwara_session_ended so they can rejoin on reconnect.
+  const reconnectTimers = new Map();
+  const RECONNECT_GRACE_MS = 15000; // 15 s grace period
+
+  function cancelReconnectTimer(sessionId) {
+    const timer = reconnectTimers.get(String(sessionId));
+    if (timer) {
+      clearTimeout(timer);
+      reconnectTimers.delete(String(sessionId));
+    }
+  }
   const {
     createRoom,
     getRoom,
@@ -256,7 +269,7 @@ function createMashwaraService({io, mashwaraState, socketState, pushService, que
     }
   }
 
-  async function notifyIncomingCall({sessionId, userId, displayName, remoteUserId}) {
+  async function notifyIncomingCall({sessionId, userId, displayName, remoteUserId, data = {}}) {
     if (!remoteUserId) {
       return;
     }
@@ -269,6 +282,20 @@ function createMashwaraService({io, mashwaraState, socketState, pushService, que
       sessionId: String(sessionId),
       caller_id: userId,
       caller_name: displayName || 'Someone',
+      callType: data.callType || data.call_type || 'mashwaraAudio',
+      registrationId: data.registrationId ?? data.registration_id ?? null,
+      liveChatId:
+        data.liveChatId ??
+        data.live_chat_id ??
+        data.mashwaraId ??
+        data.mashwara_id ??
+        null,
+      slotId: data.slotId ?? data.slot_id ?? null,
+      liveChatDate: data.liveChatDate ?? data.live_chat_date ?? null,
+      liveChatStartTime:
+        data.liveChatStartTime ?? data.live_chat_start_time ?? null,
+      liveChatEndTime:
+        data.liveChatEndTime ?? data.live_chat_end_time ?? null,
       timestamp: new Date().toISOString(),
     };
 
@@ -297,10 +324,7 @@ function createMashwaraService({io, mashwaraState, socketState, pushService, que
         `${displayName || 'Someone'} is calling you for Mashwara`,
         {
           type: 'incoming_mashwara_call',
-          sessionId: String(sessionId),
-          caller_id: userId,
-          caller_name: displayName || 'Someone',
-          timestamp: new Date().toISOString(),
+          ...payload,
         },
       );
     } catch (error) {
@@ -338,7 +362,7 @@ function createMashwaraService({io, mashwaraState, socketState, pushService, que
       await createHistoryRecord(room, data);
 
       socket.join(String(sessionId));
-      await notifyIncomingCall({sessionId, userId, displayName, remoteUserId});
+      await notifyIncomingCall({sessionId, userId, displayName, remoteUserId, data});
 
       callback({
         success: true,
@@ -358,6 +382,8 @@ function createMashwaraService({io, mashwaraState, socketState, pushService, que
   }
 
   function handleJoinRoom(socket, data, callback) {
+    // If the user is rejoining after a disconnect, cancel any pending teardown.
+    cancelReconnectTimer((data || {}).sessionId);
     const {sessionId, userId, displayName} = data || {};
 
     try {
@@ -395,6 +421,8 @@ function createMashwaraService({io, mashwaraState, socketState, pushService, que
       addParticipant(sessionId, userId, {
         socketId: socket.id,
         displayName: displayName || 'Guest',
+        audioMuted: Boolean(data.audioMuted),
+        videoMuted: Boolean(data.videoMuted),
       });
 
       socket.join(String(sessionId));
@@ -426,6 +454,8 @@ function createMashwaraService({io, mashwaraState, socketState, pushService, que
         sessionId: String(sessionId),
         userId: String(userId),
         displayName: displayName || 'Guest',
+        audioMuted: Boolean(data.audioMuted),
+        videoMuted: Boolean(data.videoMuted),
         participants: getParticipantList(sessionId),
         timestamp: new Date().toISOString(),
       };
@@ -556,6 +586,10 @@ function createMashwaraService({io, mashwaraState, socketState, pushService, que
         console.error('[Mashwara] Failed to persist ended session history:', error);
       })
       .finally(() => {
+        // Cancel any pending disconnect-grace timer so it doesn't fire after
+        // the host has explicitly ended the session.
+        cancelReconnectTimer(sessionId);
+
         io.to(String(sessionId)).emit('mashwara_session_ended', {
           sessionId: String(sessionId),
           endedBy: String(hostUserId),
@@ -623,53 +657,83 @@ function createMashwaraService({io, mashwaraState, socketState, pushService, que
     socket.leave(String(sessionId));
 
     if (room.participants.size <= 1) {
-      const endedAt = new Date();
       const finalReason =
         reason === 'disconnect'
           ? (isHost ? 'host_disconnected' : 'participant_disconnected')
           : (isHost ? 'host_left' : 'participant_left');
-      const durationSeconds = toWholeSeconds(room.startedAt || room.answeredAt, endedAt);
-      const billableMinutes = toBillableMinutes(durationSeconds);
-      const totalFee = Number((billableMinutes * toMoney(room.feePerMinute)).toFixed(2));
-      const historyStatus =
-        finalReason.includes('disconnected') && !room.answeredAt
-          ? 'missed'
-          : finalReason.includes('disconnected')
-            ? 'failed'
-            : 'ended';
 
-      updateHistoryRecord(room, {
-        status: historyStatus,
-        endedAt,
-        ringDurationSeconds:
-          room.answeredAt
-            ? room.ringDurationSeconds || 0
-            : toWholeSeconds(room.ringingAt || room.initiatedAt, endedAt),
-        durationSeconds,
-        billableMinutes,
-        totalFee,
-        endReason: finalReason,
-        failureReason: finalReason.includes('disconnected') ? 'socket_disconnect' : null,
-        meta: {
-          endedByUserId: String(userId),
-          endedByRole: isHost ? 'host' : 'participant',
-          endSource: reason,
-          remainingParticipantCount: room.participants.size,
-        },
-      })
-        .catch(error => {
-          console.error('[Mashwara] Failed to persist leave/disconnect history:', error);
+      // For intentional leaves (host_left / participant_left) end immediately.
+      // For unexpected disconnects, wait RECONNECT_GRACE_MS before tearing
+      // down so the client can reconnect and rejoin without losing the session.
+      const isUnexpectedDisconnect = reason === 'disconnect';
+
+      const doTeardown = () => {
+        // Re-check the room still exists and is still nearly empty.
+        const currentRoom = getRoom(sessionId);
+        if (!currentRoom) {
+          return; // Already cleaned up (e.g. explicit end_session fired first).
+        }
+
+        reconnectTimers.delete(String(sessionId));
+
+        const endedAt = new Date();
+        const durationSeconds = toWholeSeconds(currentRoom.startedAt || currentRoom.answeredAt, endedAt);
+        const billableMinutes = toBillableMinutes(durationSeconds);
+        const totalFee = Number((billableMinutes * toMoney(currentRoom.feePerMinute)).toFixed(2));
+        const historyStatus =
+          finalReason.includes('disconnected') && !currentRoom.answeredAt
+            ? 'missed'
+            : finalReason.includes('disconnected')
+              ? 'failed'
+              : 'ended';
+
+        updateHistoryRecord(currentRoom, {
+          status: historyStatus,
+          endedAt,
+          ringDurationSeconds:
+            currentRoom.answeredAt
+              ? currentRoom.ringDurationSeconds || 0
+              : toWholeSeconds(currentRoom.ringingAt || currentRoom.initiatedAt, endedAt),
+          durationSeconds,
+          billableMinutes,
+          totalFee,
+          endReason: finalReason,
+          failureReason: finalReason.includes('disconnected') ? 'socket_disconnect' : null,
+          meta: {
+            endedByUserId: String(userId),
+            endedByRole: isHost ? 'host' : 'participant',
+            endSource: reason,
+            remainingParticipantCount: currentRoom.participants.size,
+          },
         })
-        .finally(() => {
-          io.to(String(sessionId)).emit('mashwara_session_ended', {
-            sessionId: String(sessionId),
-            endedBy: String(userId),
-            reason: finalReason,
-            timestamp: endedAt.toISOString(),
+          .catch(error => {
+            console.error('[Mashwara] Failed to persist leave/disconnect history:', error);
+          })
+          .finally(() => {
+            io.to(String(sessionId)).emit('mashwara_session_ended', {
+              sessionId: String(sessionId),
+              endedBy: String(userId),
+              reason: finalReason,
+              timestamp: endedAt.toISOString(),
+            });
+            deleteRoom(sessionId);
+            io.socketsLeave(String(sessionId));
           });
-          deleteRoom(sessionId);
-          io.socketsLeave(String(sessionId));
-        });
+      };
+
+      if (isUnexpectedDisconnect) {
+        // Cancel any existing timer for this session (e.g. both sides disconnect
+        // at the same time) and schedule a fresh one.
+        cancelReconnectTimer(sessionId);
+        console.log(
+          `[Mashwara] Disconnect grace period started for session ${sessionId} (user ${userId}, ${RECONNECT_GRACE_MS}ms)`,
+        );
+        const timer = setTimeout(doTeardown, RECONNECT_GRACE_MS);
+        reconnectTimers.set(String(sessionId), timer);
+      } else {
+        // Intentional leave — end immediately.
+        doTeardown();
+      }
       return;
     }
 
