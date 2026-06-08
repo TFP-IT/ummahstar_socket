@@ -134,7 +134,7 @@ async function createWorkers() {
     });
 
     mediasoupWorkers.push(worker);
-    console.log(`[LiveStream] Worker ${worker.pid} created`);
+    // console.log(`[LiveStream] Worker ${worker.pid} created`);
   }
 }
 

@@ -76,7 +76,7 @@ createWorkers().then(() => {
     pushService: services.pushService,
     queryDb
   });
-  console.log('[LiveStream] mediasoup SFU ready');
+  // console.log('[LiveStream] mediasoup SFU ready');
 }).catch(err => {
   console.error('[LiveStream] Failed to start mediasoup workers:', err);
   // Server continues without live-stream; existing features unaffected
