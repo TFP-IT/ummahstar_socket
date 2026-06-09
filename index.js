@@ -33,6 +33,7 @@ const io = new Server(server, {
     origin: '*',
     methods: ['GET', 'POST'],
   },
+  maxHttpBufferSize: 50e6, // 50MB — allows large file uploads
 });
 
 const db = createDbConnection(process.env);
