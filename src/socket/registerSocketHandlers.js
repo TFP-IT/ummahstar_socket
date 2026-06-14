@@ -369,6 +369,18 @@ function registerSocketHandlers({io, socketState, services}) {
       socket.broadcast.to(data.room_id).emit('typing_event_receive', data);
     });
 
+    socket.on('message_reaction', data => {
+      const {messageId, conversationId, userId, reactionType} = data;
+      if (!messageId || !conversationId) return;
+
+      io.to(conversationId).emit('message_reaction_receive', {
+        messageId,
+        conversationId,
+        userId,
+        reactionType,
+      });
+    });
+
     socket.on('leave-room', roomId => {
       if (roomId === 0) return;
 
