@@ -153,14 +153,102 @@ function createMashwaraService({io, mashwaraState, socketState, pushService, que
     );
 
     room.historyId = result.insertId;
+    room.registrationId = data.registrationId ?? data.registration_id ?? null;
     room.callTypeRaw = callTypeRaw;
     room.callMode = callMode;
     room.feePerMinute = feePerMinute;
     room.initiatedAt = initiatedAt;
     room.ringingAt = initiatedAt;
     room.historyMeta = meta;
-
     return result.insertId;
+  }
+
+  async function releasePayoutToHost(room) {
+    if (!queryDb || !room?.registrationId || !room?.hostUserId) {
+      console.log('[Mashwara Payout] Missing registrationId or hostUserId for payout release');
+      return;
+    }
+
+    try {
+      // 1. Get the transaction record for this registration to know the transaction amount.
+      const transactions = await queryDb(
+        `
+          SELECT id, txn_amount, payout_status 
+          FROM transactions 
+          WHERE registration_id = ? AND status = 'success' 
+          LIMIT 1
+        `,
+        [room.registrationId],
+      );
+
+      if (!transactions || transactions.length === 0) {
+        console.log(`[Mashwara Payout] No successful transaction found for registration_id: ${room.registrationId}`);
+        return;
+      }
+
+      const txn = transactions[0];
+      if (txn.payout_status !== 'held') {
+        console.log(`[Mashwara Payout] Transaction payout_status is already '${txn.payout_status}' (expected 'held') for registration_id: ${room.registrationId}`);
+        return;
+      }
+
+      const amount = toMoney(txn.txn_amount);
+
+      // 2. Mark transaction payout_status as 'released'
+      await queryDb(
+        `
+          UPDATE transactions 
+          SET payout_status = 'released' 
+          WHERE id = ?
+        `,
+        [txn.id],
+      );
+
+      // 3. Update host's wallet (create if not exists)
+      const wallets = await queryDb(
+        `SELECT id FROM wallets WHERE user_id = ? LIMIT 1`,
+        [room.hostUserId]
+      );
+
+      if (!wallets || wallets.length === 0) {
+        // Create wallet with balance set to amount and held_balance set to 0.00
+        await queryDb(
+          `
+            INSERT INTO wallets (user_id, balance, held_balance, currency, created_at, updated_at)
+            VALUES (?, ?, 0.00, 'USD', NOW(), NOW())
+          `,
+          [room.hostUserId, amount]
+        );
+      } else {
+        // Move the amount from held_balance to balance
+        await queryDb(
+          `
+            UPDATE wallets 
+            SET held_balance = GREATEST(0.00, held_balance - ?), 
+                balance = balance + ?,
+                updated_at = NOW()
+            WHERE user_id = ?
+          `,
+          [amount, amount, room.hostUserId],
+        );
+      }
+
+      console.log(`[Mashwara Payout] Successfully released payout of ${amount} to host ${room.hostUserId} for registration ${room.registrationId}`);
+
+      // 4. Emit real-time socket notification to the host
+      const hostSocket = socketState.getOnlineUser(room.hostUserId) || socketState.getConnectedUser?.(room.hostUserId);
+      if (hostSocket?.socketId) {
+        io.to(hostSocket.socketId).emit('wallet_balance_updated', {
+          success: true,
+          message: 'Your payout has been released!',
+          amount: amount,
+          registrationId: room.registrationId,
+          type: 'mashwara_credit',
+        });
+      }
+    } catch (error) {
+      console.error(`[Mashwara Payout] Error releasing payout for registration ${room.registrationId}:`, error);
+    }
   }
 
   async function updateHistoryRecord(room, patch = {}) {
@@ -582,6 +670,9 @@ function createMashwaraService({io, mashwaraState, socketState, pushService, que
         endSource: 'end_session',
       },
     })
+      .then(async () => {
+        await releasePayoutToHost(room);
+      })
       .catch(error => {
         console.error('[Mashwara] Failed to persist ended session history:', error);
       })
@@ -706,6 +797,11 @@ function createMashwaraService({io, mashwaraState, socketState, pushService, que
             remainingParticipantCount: currentRoom.participants.size,
           },
         })
+          .then(async () => {
+            if (historyStatus === 'ended') {
+              await releasePayoutToHost(currentRoom);
+            }
+          })
           .catch(error => {
             console.error('[Mashwara] Failed to persist leave/disconnect history:', error);
           })
