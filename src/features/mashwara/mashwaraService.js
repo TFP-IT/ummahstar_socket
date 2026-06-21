@@ -159,6 +159,8 @@ function createMashwaraService({io, mashwaraState, socketState, pushService, que
     room.initiatedAt = initiatedAt;
     room.ringingAt = initiatedAt;
     room.historyMeta = meta;
+    room.liveChatId = data.liveChatId ?? data.live_chat_id ?? data.mashwaraId ?? data.mashwara_id ?? null;
+    room.registrationId = data.registrationId ?? data.registration_id ?? null;
 
     return result.insertId;
   }
@@ -266,6 +268,51 @@ function createMashwaraService({io, mashwaraState, socketState, pushService, que
     room.historyMeta = nextMeta;
     if (patch.receiverUserId) {
       room.receiverUserId = String(patch.receiverUserId);
+    }
+  }
+
+  async function releasePayout(liveChatId, guestUserId) {
+    if (!queryDb || !liveChatId || !guestUserId) {
+      return;
+    }
+    try {
+      console.log(`[Mashwara Payout] Attempting to release payout for liveChatId: ${liveChatId}, guestUserId: ${guestUserId}`);
+      const result = await queryDb(
+        `
+          UPDATE transactions
+          SET payout_status = 'released', updated_at = NOW()
+          WHERE user_id = ? AND event_id = ? AND event = 'livechat' AND status = '1' AND payout_status = 'held'
+        `,
+        [guestUserId, liveChatId]
+      );
+      console.log(`[Mashwara Payout] Release result:`, result);
+    } catch (err) {
+      console.error('[Mashwara Payout] Error releasing payout:', err);
+    }
+  }
+
+  async function handleReleasePayout(socket, data) {
+    const {sessionId, userId} = data || {};
+    const room = getRoom(sessionId);
+    if (!room) {
+      return;
+    }
+    const guestUserId = room.remoteUserId;
+    const liveChatId = room.liveChatId;
+    if (!guestUserId || !liveChatId) {
+      console.warn(`[Mashwara Payout] Cannot release payout, guestUserId: ${guestUserId}, liveChatId: ${liveChatId}`);
+      return;
+    }
+    await releasePayout(liveChatId, guestUserId);
+  }
+
+  async function checkAndReleasePayout(room, isHost) {
+    if (!isHost && room) {
+      const guestUserId = room.remoteUserId;
+      const liveChatId = room.liveChatId;
+      if (guestUserId && liveChatId) {
+        await releasePayout(liveChatId, guestUserId);
+      }
     }
   }
 
@@ -611,6 +658,13 @@ function createMashwaraService({io, mashwaraState, socketState, pushService, que
 
     const endedAt = new Date();
     const ringDurationSeconds = toWholeSeconds(room.ringingAt || room.initiatedAt, endedAt);
+    const isHostDeclined = String(recipient_id) === String(room.hostUserId);
+
+    if (!isHostDeclined) {
+      checkAndReleasePayout(room, false).catch(error => {
+        console.error('[Mashwara] Failed to auto-release payout on user decline:', error);
+      });
+    }
 
     updateHistoryRecord(room, {
       receiverUserId: recipient_id,
@@ -621,7 +675,7 @@ function createMashwaraService({io, mashwaraState, socketState, pushService, que
       meta: {
         endedByUserId: String(recipient_id),
         endedByRole:
-          String(recipient_id) === String(room.hostUserId) ? 'host' : 'participant',
+          isHostDeclined ? 'host' : 'participant',
         endSource: 'decline',
       },
     })
@@ -686,6 +740,10 @@ function createMashwaraService({io, mashwaraState, socketState, pushService, que
             : finalReason.includes('disconnected')
               ? 'failed'
               : 'ended';
+
+        checkAndReleasePayout(currentRoom, isHost).catch(error => {
+          console.error('[Mashwara] Failed to auto-release payout on leave:', error);
+        });
 
         updateHistoryRecord(currentRoom, {
           status: historyStatus,
@@ -770,6 +828,7 @@ function createMashwaraService({io, mashwaraState, socketState, pushService, que
     handleEndSession,
     handleDeclineCall,
     handleLeaveRoom,
+    handleReleasePayout,
     handleSocketDisconnect,
   };
 }
