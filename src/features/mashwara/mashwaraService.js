@@ -90,6 +90,31 @@ function createMashwaraService({io, mashwaraState, socketState, pushService, que
     return Math.ceil(durationSeconds / 60);
   }
 
+  function shouldCompleteSession(room) {
+    if (!room) return false;
+
+    // If the room was never answered or started, it was never a real call.
+    if (!room.startedAt && !room.joinedAt && !room.answeredAt) {
+      return false;
+    }
+
+    if (!room.scheduledEndTime) {
+      return true;
+    }
+
+    const scheduledEnd = new Date(room.scheduledEndTime);
+    if (Number.isNaN(scheduledEnd.getTime())) {
+      return true;
+    }
+
+    const now = new Date();
+    // Calculate remaining milliseconds: scheduledEnd - now
+    const diffMs = scheduledEnd.getTime() - now.getTime();
+
+    // If the remaining time is <= 5 minutes (300,000 ms), it is considered completed.
+    return diffMs <= 300000;
+  }
+
   async function createHistoryRecord(room, data = {}) {
     if (!queryDb || !room?.sessionId) {
       return null;
@@ -103,6 +128,28 @@ function createMashwaraService({io, mashwaraState, socketState, pushService, que
       sessionType: data.sessionType ?? 'mashwara',
       source: 'socket',
     };
+
+    // Rename old history records with the same session_id to avoid unique constraint issues when calling again.
+    try {
+      await queryDb(
+        `
+          UPDATE live_chat_join_histories
+          SET session_id = CONCAT(session_id, '_old_', id)
+          WHERE session_id = ?
+        `,
+        [room.sessionId]
+      );
+    } catch (err) {
+      console.error('[Mashwara] Failed to rename old history records:', err);
+    }
+
+    const dateStr = data.liveChatDate ?? data.live_chat_date;
+    const endTimeStr = data.liveChatEndTime ?? data.live_chat_end_time;
+    if (dateStr && endTimeStr) {
+      room.scheduledEndTime = new Date(`${dateStr} ${endTimeStr}`);
+    } else {
+      room.scheduledEndTime = null;
+    }
 
     const result = await queryDb(
       `
@@ -663,10 +710,13 @@ function createMashwaraService({io, mashwaraState, socketState, pushService, que
         endSource: 'end_session',
       },
     })
-      .then(() => {
-        // Only mark the slot completed when the session was actually live
-        if (room.answeredAt || room.startedAt) {
-          return updateSlotCompleted(room);
+      .then(async () => {
+        if (shouldCompleteSession(room)) {
+          await updateSlotCompleted(room);
+          const guestUserId = room.remoteUserId ?? room.receiverUserId;
+          if (guestUserId && room.liveChatId) {
+            await releasePayout(room.liveChatId, guestUserId);
+          }
         }
       })
       .catch(error => {
@@ -699,12 +749,6 @@ function createMashwaraService({io, mashwaraState, socketState, pushService, que
     const endedAt = new Date();
     const ringDurationSeconds = toWholeSeconds(room.ringingAt || room.initiatedAt, endedAt);
     const isHostDeclined = String(recipient_id) === String(room.hostUserId);
-
-    if (!isHostDeclined) {
-      checkAndReleasePayout(room, false).catch(error => {
-        console.error('[Mashwara] Failed to auto-release payout on user decline:', error);
-      });
-    }
 
     updateHistoryRecord(room, {
       receiverUserId: recipient_id,
@@ -781,9 +825,17 @@ function createMashwaraService({io, mashwaraState, socketState, pushService, que
               ? 'failed'
               : 'ended';
 
-        checkAndReleasePayout(currentRoom, isHost).catch(error => {
-          console.error('[Mashwara] Failed to auto-release payout on leave:', error);
-        });
+        const completes = shouldCompleteSession(currentRoom);
+
+        let payoutPromise = Promise.resolve();
+        if (completes) {
+          const guestUserId = currentRoom.remoteUserId ?? currentRoom.receiverUserId;
+          if (guestUserId && currentRoom.liveChatId) {
+            payoutPromise = releasePayout(currentRoom.liveChatId, guestUserId).catch(error => {
+              console.error('[Mashwara] Failed to release payout on leave:', error);
+            });
+          }
+        }
 
         updateHistoryRecord(currentRoom, {
           status: historyStatus,
@@ -804,10 +856,9 @@ function createMashwaraService({io, mashwaraState, socketState, pushService, que
             remainingParticipantCount: currentRoom.participants.size,
           },
         })
-          .then(() => {
-            // Mark the slot completed only when the session was actually answered
-            // (not for missed or declined calls)
-            if (currentRoom.answeredAt || currentRoom.startedAt) {
+          .then(async () => {
+            await payoutPromise;
+            if (completes) {
               return updateSlotCompleted(currentRoom);
             }
           })
