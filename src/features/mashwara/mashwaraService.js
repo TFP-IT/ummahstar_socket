@@ -291,6 +291,40 @@ function createMashwaraService({io, mashwaraState, socketState, pushService, que
     }
   }
 
+  // Update live_chat_time_slots.status = 2 (completed) when a real session ends.
+  // Only called when the slot was actually answered — not for missed/declined calls.
+  async function updateSlotCompleted(room) {
+    if (!queryDb) return;
+
+    const liveChatId = room.liveChatId;
+    // The guest (booked_by) could be the remoteUserId stored on the room.
+    const bookedBy = room.remoteUserId ?? room.receiverUserId ?? null;
+
+    if (!liveChatId) {
+      console.warn('[Mashwara Slot] Cannot mark slot completed — liveChatId missing');
+      return;
+    }
+
+    try {
+      let sql, params;
+      if (bookedBy) {
+        sql = `UPDATE live_chat_time_slots SET status = 2, updated_at = NOW()
+               WHERE live_chat_id = ? AND booked_by = ? AND status != 2`;
+        params = [liveChatId, bookedBy];
+      } else {
+        // Fallback: mark any booked slot for this live_chat as completed
+        sql = `UPDATE live_chat_time_slots SET status = 2, updated_at = NOW()
+               WHERE live_chat_id = ? AND is_booked = 1 AND status != 2`;
+        params = [liveChatId];
+      }
+
+      const result = await queryDb(sql, params);
+      console.log(`[Mashwara Slot] Marked completed (liveChatId=${liveChatId}, bookedBy=${bookedBy}):`, result);
+    } catch (err) {
+      console.error('[Mashwara Slot] Error marking slot completed:', err);
+    }
+  }
+
   async function handleReleasePayout(socket, data) {
     const {sessionId, userId} = data || {};
     const room = getRoom(sessionId);
@@ -629,6 +663,12 @@ function createMashwaraService({io, mashwaraState, socketState, pushService, que
         endSource: 'end_session',
       },
     })
+      .then(() => {
+        // Only mark the slot completed when the session was actually live
+        if (room.answeredAt || room.startedAt) {
+          return updateSlotCompleted(room);
+        }
+      })
       .catch(error => {
         console.error('[Mashwara] Failed to persist ended session history:', error);
       })
@@ -764,6 +804,13 @@ function createMashwaraService({io, mashwaraState, socketState, pushService, que
             remainingParticipantCount: currentRoom.participants.size,
           },
         })
+          .then(() => {
+            // Mark the slot completed only when the session was actually answered
+            // (not for missed or declined calls)
+            if (currentRoom.answeredAt || currentRoom.startedAt) {
+              return updateSlotCompleted(currentRoom);
+            }
+          })
           .catch(error => {
             console.error('[Mashwara] Failed to persist leave/disconnect history:', error);
           })
