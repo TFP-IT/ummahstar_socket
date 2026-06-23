@@ -27,3 +27,5 @@ yarn-debug.log*
 yarn-error.log*
 
 ummahstar-d55c6-firebase-adminsdk-fbsvc-c5e5035a60.json
+
+payout_cron.log
