@@ -451,10 +451,6 @@ function registerSocketHandlers({io, socketState, services}) {
         mashwaraService.handleEndSession(socket, data);
       });
 
-      socket.on('mashwara_release_payout', data => {
-        mashwaraService.handleReleasePayout(socket, data);
-      });
-
       socket.on('mashwara_decline_call', data => {
         mashwaraService.handleDeclineCall(socket, data);
       });

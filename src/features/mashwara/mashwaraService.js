@@ -318,26 +318,6 @@ function createMashwaraService({io, mashwaraState, socketState, pushService, que
     }
   }
 
-  async function releasePayout(liveChatId, guestUserId) {
-    if (!queryDb || !liveChatId || !guestUserId) {
-      return;
-    }
-    try {
-      console.log(`[Mashwara Payout] Attempting to release payout for liveChatId: ${liveChatId}, guestUserId: ${guestUserId}`);
-      const result = await queryDb(
-        `
-          UPDATE transactions
-          SET payout_status = 'released', updated_at = NOW()
-          WHERE user_id = ? AND event_id = ? AND event = 'livechat' AND status = '1' AND payout_status = 'held'
-        `,
-        [guestUserId, liveChatId]
-      );
-      console.log(`[Mashwara Payout] Release result:`, result);
-    } catch (err) {
-      console.error('[Mashwara Payout] Error releasing payout:', err);
-    }
-  }
-
   // Update live_chat_time_slots.status = 2 (completed) when a real session ends.
   // Only called when the slot was actually answered — not for missed/declined calls.
   async function updateSlotCompleted(room) {
@@ -369,31 +349,6 @@ function createMashwaraService({io, mashwaraState, socketState, pushService, que
       console.log(`[Mashwara Slot] Marked completed (liveChatId=${liveChatId}, bookedBy=${bookedBy}):`, result);
     } catch (err) {
       console.error('[Mashwara Slot] Error marking slot completed:', err);
-    }
-  }
-
-  async function handleReleasePayout(socket, data) {
-    const {sessionId, userId} = data || {};
-    const room = getRoom(sessionId);
-    if (!room) {
-      return;
-    }
-    const guestUserId = room.remoteUserId;
-    const liveChatId = room.liveChatId;
-    if (!guestUserId || !liveChatId) {
-      console.warn(`[Mashwara Payout] Cannot release payout, guestUserId: ${guestUserId}, liveChatId: ${liveChatId}`);
-      return;
-    }
-    await releasePayout(liveChatId, guestUserId);
-  }
-
-  async function checkAndReleasePayout(room, isHost) {
-    if (!isHost && room) {
-      const guestUserId = room.remoteUserId;
-      const liveChatId = room.liveChatId;
-      if (guestUserId && liveChatId) {
-        await releasePayout(liveChatId, guestUserId);
-      }
     }
   }
 
@@ -711,12 +666,9 @@ function createMashwaraService({io, mashwaraState, socketState, pushService, que
       },
     })
       .then(async () => {
-        if (shouldCompleteSession(room)) {
+        const isCallStarted = room.startedAt || room.joinedAt || room.answeredAt;
+        if (isCallStarted) {
           await updateSlotCompleted(room);
-          const guestUserId = room.remoteUserId ?? room.receiverUserId;
-          if (guestUserId && room.liveChatId) {
-            await releasePayout(room.liveChatId, guestUserId);
-          }
         }
       })
       .catch(error => {
@@ -825,17 +777,7 @@ function createMashwaraService({io, mashwaraState, socketState, pushService, que
               ? 'failed'
               : 'ended';
 
-        const completes = shouldCompleteSession(currentRoom);
-
-        let payoutPromise = Promise.resolve();
-        if (completes) {
-          const guestUserId = currentRoom.remoteUserId ?? currentRoom.receiverUserId;
-          if (guestUserId && currentRoom.liveChatId) {
-            payoutPromise = releasePayout(currentRoom.liveChatId, guestUserId).catch(error => {
-              console.error('[Mashwara] Failed to release payout on leave:', error);
-            });
-          }
-        }
+        // Payout release is disabled.
 
         updateHistoryRecord(currentRoom, {
           status: historyStatus,
@@ -857,9 +799,9 @@ function createMashwaraService({io, mashwaraState, socketState, pushService, que
           },
         })
           .then(async () => {
-            await payoutPromise;
-            if (completes) {
-              return updateSlotCompleted(currentRoom);
+            const isCallStarted = currentRoom.startedAt || currentRoom.joinedAt || currentRoom.answeredAt;
+            if (isCallStarted) {
+              await updateSlotCompleted(currentRoom);
             }
           })
           .catch(error => {
@@ -926,7 +868,6 @@ function createMashwaraService({io, mashwaraState, socketState, pushService, que
     handleEndSession,
     handleDeclineCall,
     handleLeaveRoom,
-    handleReleasePayout,
     handleSocketDisconnect,
   };
 }
