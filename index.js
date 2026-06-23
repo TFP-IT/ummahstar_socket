@@ -21,6 +21,7 @@ const {createLiveStreamService, createWorkers} = require('./src/features/liveStr
 const {createLiveStreamState} = require('./src/features/liveStream/liveStreamState');
 const {registerSocketHandlers} = require('./src/socket/registerSocketHandlers');
 
+
 const app = express();
 const server = http.createServer(app);
 
@@ -89,6 +90,8 @@ registerSocketHandlers({
   socketState,
   services,
 });
+
+
 
 app.get('/', (req, res) => {
   res.sendFile(path.join(__dirname, 'index.html'));
