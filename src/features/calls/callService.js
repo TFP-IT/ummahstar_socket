@@ -3,9 +3,63 @@ const {
   STALE_CALL_MS,
   STALE_CALL_CLEANUP_INTERVAL_MS,
 } = require('../../config/constants');
+const { v4: uuidv4 } = require('uuid');
 
-function createCallService({io, queryDb, socketState, pushService}) {
+function createCallService({io, queryDb, socketState, pushService, messageService}) {
   const {activeCalls, getOnlineUser} = socketState;
+
+  async function logCallAsMessage(call) {
+    if (!messageService) {
+      console.log('messageService not provided to callService');
+      return;
+    }
+    try {
+      const duration = call.duration || 0;
+      const status = call.status; // 'completed', 'missed', 'rejected'
+      const callType = call.callType || 'voice'; // 'voice', 'video'
+      
+      let messageContent = '';
+      if (status === 'completed') {
+        const mins = Math.floor(duration / 60);
+        const secs = duration % 60;
+        const durationStr = mins > 0 ? `${mins}:${secs.toString().padStart(2, '0')}` : `${secs}s`;
+        messageContent = `${callType === 'video' ? 'Video' : 'Voice'} call ended • ${durationStr}`;
+      } else if (status === 'rejected') {
+        messageContent = `Declined ${callType} call`;
+      } else {
+        messageContent = `Missed ${callType} call`;
+      }
+
+      const msgUuid = uuidv4();
+
+      const messagePayload = {
+        uuid: msgUuid,
+        conversation_id: call.conversation_id,
+        user_id: call.caller_id,
+        encrypted_content: messageContent,
+        iv: 'dummy-iv',
+        message_type: 'call',
+        metadata: JSON.stringify({
+          call_id: call.callId,
+          call_type: callType,
+          status: status,
+          duration: duration,
+        }),
+        reply_to: null,
+      };
+
+      const savedMessage = await messageService.saveMessage(messagePayload);
+      await messageService.updateConversationTimestamp(call.conversation_id);
+
+      io.to(call.conversation_id).emit('receive_message', {
+        ...savedMessage,
+        created_at: new Date().toISOString(),
+      });
+      console.log(`Log call as message succeeded for conversation: ${call.conversation_id}`);
+    } catch (err) {
+      console.error('Failed to log call as message:', err);
+    }
+  }
 
   function normalizeCallType(callType) {
     const normalized = String(callType || '').toLowerCase();
@@ -315,6 +369,8 @@ function createCallService({io, queryDb, socketState, pushService}) {
           leftAt: endedAt,
         });
 
+        await logCallAsMessage(call);
+
         if (otherUser) {
           io.to(otherUser.socketId).emit(
             'call_ended',
@@ -404,6 +460,8 @@ function createCallService({io, queryDb, socketState, pushService}) {
           'left',
           {leftAt: endedAt},
         );
+
+        await logCallAsMessage(currentCall);
 
         socket.emit(
           'call_failed',
@@ -543,6 +601,8 @@ function createCallService({io, queryDb, socketState, pushService}) {
         leftAt: endedAt,
       });
 
+      await logCallAsMessage(call);
+
       const payload = buildCallEventPayload(call, {
         declined_by: data.recipient_id,
         timestamp: endedAt.toISOString(),
@@ -589,6 +649,8 @@ function createCallService({io, queryDb, socketState, pushService}) {
         'left',
         {leftAt: endTime},
       );
+
+      await logCallAsMessage(call);
 
       const payload = buildCallEventPayload(call, {
         ended_by: data.user_id,
@@ -714,6 +776,7 @@ function createCallService({io, queryDb, socketState, pushService}) {
               ),
             ),
           )
+          .then(() => logCallAsMessage(call))
           .catch(error => {
             console.error('Failed to persist stale call cleanup:', error);
           })

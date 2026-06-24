@@ -57,6 +57,7 @@ services.callService = createCallService({
   queryDb,
   socketState,
   pushService: services.pushService,
+  messageService: services.messageService,
 });
 
 const mashwaraState = createMashwaraState();
