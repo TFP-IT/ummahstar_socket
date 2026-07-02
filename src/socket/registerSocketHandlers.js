@@ -182,6 +182,7 @@ function registerSocketHandlers({io, socketState, services}) {
       try {
         const savedMessage = await messageService.saveMessage(message);
 
+
         socket.emit('message_ack', {
           uuid: savedMessage.uuid,
           id: savedMessage.id,
@@ -303,7 +304,27 @@ function registerSocketHandlers({io, socketState, services}) {
       }
 
       try {
-        await messageService.saveMessageStatus(messageId, userId, 'read');
+        const message = await messageService.fetchMessageSender(messageId);
+        if (!message) {
+          emitSocketError(socket, 'Message not found');
+          return;
+        }
+
+        if (Number(message.sender_id) === Number(userId)) {
+          console.log('Message sender and receiver are the same');
+          return;
+        }
+
+        const isActivelyViewing = isUserActivelyViewingConversation(userId, conversationId);
+        if (!isActivelyViewing) {
+          console.log(`[mark_message_read] Blocked: User ${userId} is not actively viewing conversation ${conversationId}`);
+        }
+
+        await messageService.saveMessageStatus(messageId, userId, 'read', {
+          isActivelyViewing,
+        });
+
+        if (!isActivelyViewing) return;
 
         socket.emit('read_confirmation', {
           messageId,
@@ -313,9 +334,6 @@ function registerSocketHandlers({io, socketState, services}) {
         });
 
         await messageService.updateConversationTimestamp(conversationId);
-
-        const message = await messageService.fetchMessageSender(messageId);
-        if (!message) return;
 
         const sender = getOnlineUser(message.sender_id);
         if (sender) {

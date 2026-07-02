@@ -43,7 +43,26 @@ function createMessageService({queryDb}) {
     return {id: result.insertId, ...message};
   }
 
-  async function saveMessageStatus(messageId, userId, status) {
+  async function saveMessageStatus(messageId, userId, status, callerContext = {}) {
+    const message = await fetchMessageSender(messageId);
+    if (message) {
+      if (Number(message.sender_id) === Number(userId)) {
+        console.warn(
+          `[saveMessageStatus] BLOCKED: User ${userId} attempted to mark their own message ${messageId} as ${status}. ` +
+          `Stack trace:\n${new Error().stack}`
+        );
+        return;
+      }
+    }
+
+    if (status === 'read' && callerContext.isActivelyViewing === false) {
+      console.warn(
+        `[saveMessageStatus] BLOCKED: Attempted to mark message ${messageId} as read for user ${userId} who is NOT actively viewing the conversation. ` +
+        `Stack trace:\n${new Error().stack}`
+      );
+      return;
+    }
+
     await queryDb(
       `
         INSERT INTO message_status (

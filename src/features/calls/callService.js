@@ -327,7 +327,7 @@ function createCallService({io, queryDb, socketState, pushService, messageServic
 
       const age = Date.now() - call.start_time.getTime();
       const isStale =
-        age > STALE_CALL_MS ||
+        (call.status !== 'ongoing' && age > STALE_CALL_MS) ||
         call.status === 'missed' ||
         call.status === 'rejected' ||
         call.status === 'completed';
@@ -747,7 +747,7 @@ function createCallService({io, queryDb, socketState, pushService, messageServic
       activeCalls.forEach((call, callId) => {
         const callAge = now - call.start_time.getTime();
         const isStale =
-          callAge > STALE_CALL_MS ||
+          (call.status !== 'ongoing' && callAge > STALE_CALL_MS) ||
           (call.status !== 'ongoing' && call.status !== 'ringing');
 
         if (!isStale) {
