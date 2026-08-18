@@ -1,6 +1,6 @@
 const moment = require('moment');
 
-function createHalaqaCronService({ queryDb, pushService }) {
+function createHalaqaCronService({ queryDb, pushService, reminderMinutes = [10, 5, 1] }) {
   if (!queryDb || !pushService) {
     console.warn('[HalaqaCron] queryDb or pushService missing. Cron disabled.');
     return { stop: () => {} };
@@ -19,35 +19,70 @@ function createHalaqaCronService({ queryDb, pushService }) {
   async function checkAndSendReminders() {
     try {
       const now = moment();
-      // Target window: events starting in ~15 minutes (between 13 and 17 minutes from now)
       const dateStr = now.format('YYYY-MM-DD');
+      const tomorrowStr = moment(now).add(1, 'day').format('YYYY-MM-DD');
 
-      // 1. Query Meetup Events
+      console.log(`[HalaqaCron DEBUG] Running check at ${now.format('YYYY-MM-DD HH:mm:ss')} for dates ${dateStr}% and ${tomorrowStr}%`);
+
+      // 1. Query Meetup Events for today and tomorrow without status condition
       const meetupQuery = `
-        SELECT m.id, m.title, m.event_date, m.start_time, m.user_id as host_id
+        SELECT m.id, m.title, m.event_date, m.start_time, m.star_id as host_id
         FROM meetup_events m
-        WHERE (m.event_date = ? OR m.event_date LIKE ?)
-          AND m.status = '1'
+        WHERE (m.event_date LIKE ? OR m.event_date LIKE ?)
       `;
 
-      const meetups = await queryDb(meetupQuery, [dateStr, `${dateStr}%`]).catch(err => {
-        // Table or query fallback gracefully
+      const meetups = await queryDb(meetupQuery, [
+        `${dateStr}%`,
+        `${tomorrowStr}%`,
+      ]).catch(err => {
+        console.error('[HalaqaCron] Error fetching meetups:', err);
         return [];
       });
 
-      if (Array.isArray(meetups)) {
+      console.log(`[HalaqaCron DEBUG] Found ${Array.isArray(meetups) ? meetups.length : 0} events matching date range`);
+
+      if (Array.isArray(meetups) && meetups.length > 0) {
         for (const event of meetups) {
           const rawStart = String(event.start_time || '').trim();
-          if (!rawStart) continue;
+          if (!rawStart) {
+            console.log(`[HalaqaCron DEBUG] Event ID ${event.id} ("${event.title}") has no start_time. Skipping.`);
+            continue;
+          }
 
-          const startMoment = moment(`${dateStr} ${rawStart}`, ['YYYY-MM-DD HH:mm:ss', 'YYYY-MM-DD HH:mm', 'YYYY-MM-DD h:mm A']);
-          if (!startMoment.isValid()) continue;
+          // Extract YYYY-MM-DD date using regex to avoid timezone conversion issues
+          let eventDateStr = dateStr;
+          if (event.event_date) {
+            const rawDateStr = String(event.event_date).trim();
+            const match = rawDateStr.match(/\d{4}-\d{2}-\d{2}/);
+            if (match) {
+              eventDateStr = match[0];
+            }
+          }
 
-          const diffMinutes = startMoment.diff(now, 'minutes');
+          const startMoment = moment(`${eventDateStr} ${rawStart}`, [
+            'YYYY-MM-DD HH:mm:ss',
+            'YYYY-MM-DD HH:mm',
+            'YYYY-MM-DD h:mm:ss A',
+            'YYYY-MM-DD h:mm A',
+            'YYYY-MM-DD hh:mm:ss A',
+            'YYYY-MM-DD hh:mm A',
+            'YYYY-MM-DD H:mm:ss',
+            'YYYY-MM-DD H:mm',
+          ]);
+          if (!startMoment.isValid()) {
+            console.warn(`[HalaqaCron DEBUG] Invalid startMoment for event ${event.id}: "${eventDateStr} ${rawStart}"`);
+            continue;
+          }
 
-          // Send reminder if event starts in approximately 15 minutes (13-17 mins range)
-          if (diffMinutes >= 13 && diffMinutes <= 17) {
-            await processEventParticipants('meetup', event, 15);
+          const diffMinutes = Math.round(startMoment.diff(now, 'minutes', true));
+          console.log(`[HalaqaCron DEBUG] Event ${event.id} ("${event.title}"): start=${startMoment.format('YYYY-MM-DD HH:mm:ss')}, now=${now.format('YYYY-MM-DD HH:mm:ss')}, diffMinutes=${diffMinutes}`);
+
+          for (const targetMin of reminderMinutes) {
+            // Trigger if event starts in approximately targetMin minutes (+/- 2 mins window)
+            if (diffMinutes >= targetMin - 2 && diffMinutes <= targetMin + 2) {
+              console.log(`[HalaqaCron 🎯 MATCH!] Event ${event.id} ("${event.title}") is ~${diffMinutes}m away (matches ${targetMin}m target). Processing notifications...`);
+              await processEventParticipants('meetup', event, targetMin);
+            }
           }
         }
       }
@@ -59,23 +94,62 @@ function createHalaqaCronService({ queryDb, pushService }) {
   async function processEventParticipants(eventType, event, minutesBefore) {
     const eventId = event.id;
     const title = event.title || event.name || 'Live Halaqa';
+    const hostId = event.host_id;
 
     try {
-      // Query registered users from meetup_event_registrations with FCM token in device_id
-      const rows = await queryDb(
-        `SELECT p.user_id, u.device_id FROM meetup_event_registrations p JOIN users u ON p.user_id = u.id WHERE p.meetup_event_id = ? OR p.event_id = ?`,
+      const userTokens = new Map(); // userId -> device_id
+
+      // 1. Get host user's token if available
+      if (hostId) {
+        const hostRows = await queryDb(
+          `SELECT id as user_id, device_id FROM users WHERE id = ?`,
+          [hostId]
+        ).catch(err => {
+          console.error(`[HalaqaCron DEBUG] Host lookup error for host ${hostId}:`, err);
+          return [];
+        });
+        if (Array.isArray(hostRows) && hostRows.length > 0 && hostRows[0].device_id) {
+          console.log(`[HalaqaCron DEBUG] Found FCM token for Host ID ${hostId}`);
+          userTokens.set(hostRows[0].user_id, hostRows[0].device_id);
+        } else {
+          console.log(`[HalaqaCron DEBUG] Host ID ${hostId} has no device_id in users table.`);
+        }
+      }
+
+      // 2. Query registered users from meetup_event_registrations
+      const regRows = await queryDb(
+        `SELECT p.user_id, u.device_id 
+         FROM meetup_event_registrations p 
+         JOIN users u ON p.user_id = u.id 
+         WHERE p.meetup_event_id = ?`,
         [eventId, eventId]
-      ).catch(() => null);
+      ).catch(err => {
+        console.error(`[HalaqaCron DEBUG] Error querying meetup_event_registrations for event ${eventId}:`, err);
+        return [];
+      });
 
-      if (!Array.isArray(rows) || rows.length === 0) return;
+      if (Array.isArray(regRows)) {
+        for (const r of regRows) {
+          if (r.user_id && r.device_id) {
+            userTokens.set(r.user_id, r.device_id);
+          }
+        }
+        console.log(`[HalaqaCron DEBUG] meetup_event_registrations: found ${regRows.length} registered users`);
+      }
 
-      for (const row of rows) {
-        const userId = row.user_id;
-        const token = row.device_id;
-        if (!token) continue;
+      if (userTokens.size === 0) {
+        console.log(`[HalaqaCron DEBUG] No participants or host found with FCM token for event ${eventId} ("${title}")`);
+        return;
+      }
 
+      console.log(`[HalaqaCron DEBUG] Sending ${minutesBefore}m push to ${userTokens.size} user(s)...`);
+
+      for (const [userId, token] of userTokens.entries()) {
         const dedupeKey = `${eventType}_${eventId}_${userId}_${minutesBefore}`;
-        if (sentNotifications.has(dedupeKey)) continue;
+        if (sentNotifications.has(dedupeKey)) {
+          console.log(`[HalaqaCron DEBUG] Dedupe hit: Key "${dedupeKey}" already sent to user ${userId}. Skipping.`);
+          continue;
+        }
 
         sentNotifications.add(dedupeKey);
 
@@ -88,7 +162,7 @@ function createHalaqaCronService({ queryDb, pushService }) {
           minutesBefore: String(minutesBefore),
         };
 
-        console.log(`[HalaqaCron] Sending FCM push to user ${userId} for event "${title}"`);
+        console.log(`[HalaqaCron 🚀 PUSH SENT] Sending FCM push (${minutesBefore}m reminder) to user ${userId} for event "${title}"`);
         await pushService.sendPushToToken(token, pushTitle, pushBody, pushData, {
           channelId: 'default',
         });
