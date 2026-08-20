@@ -20,6 +20,7 @@ const {createMashwaraState} = require('./src/features/mashwara/mashwaraState');
 const {createLiveStreamService, createWorkers} = require('./src/features/liveStream/liveStreamService');
 const {createLiveStreamState} = require('./src/features/liveStream/liveStreamState');
 const {registerSocketHandlers} = require('./src/socket/registerSocketHandlers');
+const {createHalaqaCronService} = require('./src/services/halaqaCronService');
 
 
 const app = express();
@@ -50,7 +51,13 @@ const services = {
   messageService: createMessageService({queryDb}),
   callService: null,
   qnaService: createQnaService({queryDb, io}),
+  halaqaCronService: null,
 };
+
+services.halaqaCronService = createHalaqaCronService({
+  queryDb,
+  pushService: services.pushService,
+});
 
 services.callService = createCallService({
   io,
