@@ -1,40 +1,25 @@
-const fs = require('fs');
-const path = require('path');
-const {v4: uuidv4} = require('uuid');
+const {createS3UploadService} = require('./s3UploadService');
 
 function createUploadService({baseDir}) {
-  function ensureUploadsDirectory(messageType) {
-    const uploadDirectory = path.join(baseDir, 'uploads', messageType);
+  const s3Service = createS3UploadService({baseDir});
 
-    if (!fs.existsSync(uploadDirectory)) {
-      fs.mkdirSync(uploadDirectory, {recursive: true});
-    }
-
-    return uploadDirectory;
+  async function saveBase64File({uuid, fileName, fileData, messageType}) {
+    return await s3Service.uploadBase64File({
+      uuid,
+      fileName,
+      fileData,
+      messageType,
+    });
   }
 
-  function saveBase64File({uuid, fileName, fileData, messageType}) {
-    const uploadDirectory = ensureUploadsDirectory(messageType);
-    const fileExtension = path.extname(fileName);
-    const uniqueFileName = `${uuid || uuidv4()}${fileExtension}`;
-    const filePath = path.join(uploadDirectory, uniqueFileName);
-
-    fs.writeFileSync(filePath, fileData, 'base64');
-
-    if (!fs.existsSync(filePath)) {
-      throw new Error('File was not created');
-    }
-
-    return {
-      fileName: uniqueFileName,
-      filePath,
-      fileUrl: `uploads/${messageType}/${uniqueFileName}`,
-    };
+  async function generatePresignedUploadUrl(params) {
+    return await s3Service.generatePresignedUploadUrl(params);
   }
 
   return {
-    ensureUploadsDirectory,
     saveBase64File,
+    generatePresignedUploadUrl,
+    s3Service,
   };
 }
 

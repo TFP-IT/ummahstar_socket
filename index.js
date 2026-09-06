@@ -105,6 +105,21 @@ app.get('/', (req, res) => {
   res.sendFile(path.join(__dirname, 'index.html'));
 });
 
+app.post('/api/media/presigned-url', async (req, res) => {
+  try {
+    const {fileName, messageType, fileType, uuid} = req.body;
+    const result = await services.uploadService.generatePresignedUploadUrl({
+      fileName,
+      messageType,
+      fileType,
+      uuid,
+    });
+    res.json({success: true, ...result});
+  } catch (error) {
+    res.status(500).json({success: false, error: error.message});
+  }
+});
+
 server.listen(PORT, () => {
   console.log(`Socket server listening on http://localhost:${PORT}`);
 });

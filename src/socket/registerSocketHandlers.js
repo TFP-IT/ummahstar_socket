@@ -138,7 +138,7 @@ function registerSocketHandlers({io, socketState, services}) {
       callService.emitCallStatus(socket, data.callId);
     });
 
-    socket.on('upload_file', uploadData => {
+    socket.on('upload_file', async uploadData => {
       try {
         const {uuid, conversation_id, fileName, fileData, messageType} =
           uploadData;
@@ -156,7 +156,7 @@ function registerSocketHandlers({io, socketState, services}) {
           return;
         }
 
-        const uploadedFile = uploadService.saveBase64File({
+        const uploadedFile = await uploadService.saveBase64File({
           uuid,
           fileName,
           fileData,
@@ -168,6 +168,7 @@ function registerSocketHandlers({io, socketState, services}) {
           file_url: uploadedFile.fileUrl,
           fileName: uploadedFile.fileName,
           originalName: fileName,
+          storage: uploadedFile.storage || 's3',
         });
       } catch (error) {
         console.error('File upload failed:', error);
@@ -175,6 +176,34 @@ function registerSocketHandlers({io, socketState, services}) {
           success: false,
           error: error.message || 'File upload failed',
         });
+      }
+    });
+
+    socket.on('get_presigned_url', async (data, callback) => {
+      try {
+        const {fileName, messageType, fileType, uuid} = data || {};
+        const res = await uploadService.generatePresignedUploadUrl({
+          fileName,
+          messageType,
+          fileType,
+          uuid,
+        });
+
+        if (typeof callback === 'function') {
+          callback({success: true, ...res});
+        } else {
+          socket.emit('presigned_url_response', {success: true, ...res});
+        }
+      } catch (error) {
+        console.error('generatePresignedUploadUrl failed:', error);
+        if (typeof callback === 'function') {
+          callback({success: false, error: error.message});
+        } else {
+          socket.emit('presigned_url_response', {
+            success: false,
+            error: error.message,
+          });
+        }
       }
     });
 
