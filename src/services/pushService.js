@@ -77,9 +77,15 @@ function createPushService({admin, firebaseReady}) {
       },
     };
 
-    // Only add notification block if NOT an incoming call or chat message
-    // Data-only messages wake up the app's background handler on Android more reliably for calls and native chat intercept
-    const interceptNatively = isIncomingCall || data.type === 'incoming_mashwara_call' || data.type === 'chat_message';
+    // Data-only messages wake up the app's background handler on Android more reliably for calls, missed calls, and native chat intercept
+    const interceptNatively =
+      isIncomingCall ||
+      data.type === 'incoming_mashwara_call' ||
+      data.type === 'chat_message' ||
+      data.type === 'call_missed' ||
+      data.type === 'call_ended' ||
+      data.type === 'call_cancelled';
+
     if (!interceptNatively) {
       message.notification = {title, body};
       message.android.notification = {
@@ -91,8 +97,12 @@ function createPushService({admin, firebaseReady}) {
       message.apns.payload.aps.sound = 'default';
       message.data.sound = 'default';
     } else {
-      // For calls, set specific high priority flags
+      // For calls and call status updates, set specific high priority flags
       message.android.ttl = 0; // Deliver immediately
+      if (data.type === 'call_missed') {
+        message.apns.payload.aps.alert = {title, body};
+        message.apns.payload.aps.sound = 'default';
+      }
     }
 
     try {
