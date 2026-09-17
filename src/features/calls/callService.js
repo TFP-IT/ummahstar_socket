@@ -6,7 +6,11 @@ const {
 const { v4: uuidv4 } = require('uuid');
 
 function createCallService({io, queryDb, socketState, pushService, messageService}) {
-  const {activeCalls, getOnlineUser} = socketState;
+  const {activeCalls, getOnlineUser, getConnectedUser, isUserActivelyViewingConversation} = socketState;
+
+  function getActiveUser(userId) {
+    return getOnlineUser(userId) || (getConnectedUser ? getConnectedUser(userId) : null);
+  }
 
   async function logCallAsMessage(call) {
     if (!messageService) {
@@ -301,14 +305,14 @@ function createCallService({io, queryDb, socketState, pushService, messageServic
   function getExistingActiveCallForUser(userId) {
     return Array.from(activeCalls.values()).find(
       call =>
-        call.participants.includes(userId) &&
+        call.participants.some(p => String(p) === String(userId)) &&
         (call.status === 'ongoing' || call.status === 'ringing'),
     );
   }
 
   function emitCallEndedToParticipants(call, payload) {
     call.participants.forEach(userId => {
-      const user = getOnlineUser(userId);
+      const user = getActiveUser(userId);
       if (user) {
         io.to(user.socketId).emit('call_ended', payload);
       }
@@ -320,13 +324,14 @@ function createCallService({io, queryDb, socketState, pushService, messageServic
 
     activeCalls.forEach((call, callId) => {
       const containsParticipant = participants.some(participantId =>
-        call.participants.includes(participantId),
+        call.participants.some(p => String(p) === String(participantId)),
       );
 
       if (!containsParticipant) return;
 
       const age = Date.now() - call.start_time.getTime();
       const isStale =
+        (call.status === 'ringing' && age > CALL_TIMEOUT_MS) ||
         (call.status !== 'ongoing' && age > STALE_CALL_MS) ||
         call.status === 'missed' ||
         call.status === 'rejected' ||
@@ -345,16 +350,27 @@ function createCallService({io, queryDb, socketState, pushService, messageServic
 
   function cleanupUserCalls(userId, reason = 'cleanup') {
     const affectedCalls = Array.from(activeCalls.entries()).filter(([, call]) =>
-      call.participants.includes(userId),
+      call.participants.some(p => String(p) === String(userId)),
     );
 
     affectedCalls.forEach(([callId, call]) => {
+      activeCalls.delete(callId);
+      setCallStatus(call, reason === 'disconnect' ? 'missed' : 'completed');
+
       (async () => {
         const endedAt = new Date();
         const otherUserId = getOtherParticipant(call, userId);
+        const otherUser = getActiveUser(otherUserId);
         const isRinging = call.status === 'ringing';
         const isCaller = String(userId) === String(call.caller_id);
-        const endedStatus = isRinging ? 'missed' : (reason === 'disconnect' ? 'missed' : 'completed');
+        const endedStatus = isRinging
+          ? 'missed'
+          : reason === 'disconnect'
+          ? 'missed'
+          : 'completed';
+        const duration = call.answer_time
+          ? Math.floor((endedAt - call.answer_time) / 1000)
+          : 0;
 
         await updateCallRecord(call, {
           status: endedStatus,
@@ -401,8 +417,6 @@ function createCallService({io, queryDb, socketState, pushService, messageServic
         }
       })().catch(error => {
         console.error('Failed to cleanup user call:', error);
-      }).finally(() => {
-        activeCalls.delete(callId);
       });
     });
 
@@ -411,6 +425,16 @@ function createCallService({io, queryDb, socketState, pushService, messageServic
 
   async function sendMissedCallPush(callInfo) {
     try {
+      if (
+        isUserActivelyViewingConversation &&
+        callInfo?.recipient_id &&
+        callInfo?.conversation_id &&
+        isUserActivelyViewingConversation(callInfo.recipient_id, callInfo.conversation_id)
+      ) {
+        console.log(`[sendMissedCallPush] Suppressed for user ${callInfo.recipient_id} actively viewing conversation ${callInfo.conversation_id}`);
+        return;
+      }
+
       const rows = await queryDb(
         `
           SELECT device_id
@@ -529,8 +553,30 @@ function createCallService({io, queryDb, socketState, pushService, messageServic
         return;
       }
 
+      const endedAt = new Date();
+      setCallStatus(currentCall, 'missed');
+      activeCalls.delete(callInfo.callId);
+
+      socket.emit(
+        'call_failed',
+        buildCallEventPayload(currentCall, {
+          error: 'No answer',
+          reason: 'timeout',
+          timestamp: endedAt.toISOString(),
+        }),
+      );
+
+      const recipient = getActiveUser(currentCall.recipient_id);
+      if (recipient) {
+        io.to(recipient.socketId).emit(
+          'call_missed',
+          buildCallEventPayload(currentCall, {
+            timestamp: endedAt.toISOString(),
+          }),
+        );
+      }
+
       (async () => {
-        const endedAt = new Date();
         await updateCallRecord(currentCall, {
           status: 'missed',
           endedAt,
@@ -550,31 +596,9 @@ function createCallService({io, queryDb, socketState, pushService, messageServic
         );
 
         await logCallAsMessage(currentCall);
-
-        socket.emit(
-          'call_failed',
-          buildCallEventPayload(currentCall, {
-            error: 'No answer',
-            reason: 'timeout',
-            timestamp: endedAt.toISOString(),
-          }),
-        );
-
-        const recipient = getOnlineUser(currentCall.recipient_id);
-        if (recipient) {
-          io.to(recipient.socketId).emit(
-            'call_missed',
-            buildCallEventPayload(currentCall, {
-              timestamp: endedAt.toISOString(),
-            }),
-          );
-        }
-
         await sendMissedCallPush(currentCall);
       })().catch(error => {
         console.error('Failed to persist unanswered call timeout:', error);
-      }).finally(() => {
-        activeCalls.delete(callInfo.callId);
       });
     }, CALL_TIMEOUT_MS);
   }
@@ -582,16 +606,15 @@ function createCallService({io, queryDb, socketState, pushService, messageServic
   async function handleInitiateCall(socket, data) {
     console.log('Call initiated:', data);
 
-    const recipient = getOnlineUser(data.recipient_id);
+    const recipient = getActiveUser(data.recipient_id);
     cleanupStaleCallsForParticipants([data.caller_id, data.recipient_id]);
 
-    if (getExistingActiveCallForUser(data.caller_id)) {
-      socket.emit('call_failed', {
-        callId: data.callId,
-        error: 'You are already in a call',
-        reason: 'caller_busy',
-      });
-      return;
+    const existingCallerCall = getExistingActiveCallForUser(data.caller_id);
+    if (existingCallerCall) {
+      console.log(
+        `Caller ${data.caller_id} had active call ${existingCallerCall.callId}, cleaning up before initiating new call`,
+      );
+      cleanupUserCalls(data.caller_id, 'new_call_override');
     }
 
     if (getExistingActiveCallForUser(data.recipient_id)) {
@@ -603,17 +626,34 @@ function createCallService({io, queryDb, socketState, pushService, messageServic
       return;
     }
 
-    const callInfo = await createCallRecord(createCallInfo(data));
-    await insertCallParticipant(callInfo.dbCallId, callInfo.caller_id, 'joined', {
-      joinedAt: callInfo.start_time,
-    });
-    await insertCallParticipant(
-      callInfo.dbCallId,
-      callInfo.recipient_id,
-      'invited',
-    );
+    // 1. Immediately create and register callInfo in activeCalls map
+    const callInfo = createCallInfo(data);
     activeCalls.set(callInfo.callId, callInfo);
 
+    // 2. Persist call record to DB in background
+    createCallRecord(callInfo)
+      .then(async dbCall => {
+        callInfo.dbCallId = dbCall.dbCallId;
+        await insertCallParticipant(callInfo.dbCallId, callInfo.caller_id, 'joined', {
+          joinedAt: callInfo.start_time,
+        });
+        await insertCallParticipant(
+          callInfo.dbCallId,
+          callInfo.recipient_id,
+          'invited',
+        );
+      })
+      .catch(err => {
+        console.error('Failed to create call DB record in background:', err);
+      });
+
+    // 3. Check if call was cancelled in the microseconds between initiate and now
+    if (callInfo.status === 'missed' || callInfo.status === 'completed' || !activeCalls.has(callInfo.callId)) {
+      console.log(`Call ${callInfo.callId} was already cancelled before notifying recipient`);
+      return;
+    }
+
+    // 4. Notify recipient via socket AND dispatch push so locked/sleeping devices wake up immediately
     if (recipient) {
       io.to(recipient.socketId).emit(
         'incoming_call',
@@ -622,9 +662,12 @@ function createCallService({io, queryDb, socketState, pushService, messageServic
           participant_status: 'invited',
         }),
       );
-    } else {
-      await handleOfflineIncomingCall(callInfo);
     }
+
+    // Always dispatch incoming call push to wake up device if locked/in background
+    handleOfflineIncomingCall(callInfo).catch(err => {
+      console.error('Error sending incoming call push:', err);
+    });
 
     scheduleUnansweredCallTimeout(socket, callInfo);
   }
@@ -655,7 +698,7 @@ function createCallService({io, queryDb, socketState, pushService, messageServic
         participant_status: 'joined',
       });
 
-      const caller = getOnlineUser(call.caller_id);
+      const caller = getActiveUser(call.caller_id);
       if (caller) {
         io.to(caller.socketId).emit('call_answered', payload);
       }
@@ -668,17 +711,34 @@ function createCallService({io, queryDb, socketState, pushService, messageServic
   }
 
   function handleDeclineCall(socket, data) {
-    const call = activeCalls.get(data.callId);
+    let call = activeCalls.get(data.callId);
+    if (!call && data.recipient_id) {
+      call = getExistingActiveCallForUser(data.recipient_id);
+    }
     if (!call) {
       socket.emit('call_error', {error: 'Call not found'});
       return;
     }
 
-    (async () => {
-      const endedAt = new Date();
-      setCallStatus(call, 'rejected');
-      call.ended_at = endedAt;
+    const callId = call.callId;
+    const endedAt = new Date();
+    setCallStatus(call, 'rejected');
+    activeCalls.delete(callId);
 
+    const payload = buildCallEventPayload(call, {
+      declined_by: data.recipient_id,
+      timestamp: endedAt.toISOString(),
+      participant_status: 'declined',
+    });
+
+    const caller = getActiveUser(call.caller_id);
+    if (caller) {
+      io.to(caller.socketId).emit('call_declined', payload);
+    }
+
+    socket.emit('call_declined', payload);
+
+    (async () => {
       await updateCallRecord(call, {
         status: 'rejected',
         endedAt,
@@ -692,87 +752,96 @@ function createCallService({io, queryDb, socketState, pushService, messageServic
       });
 
       await logCallAsMessage(call);
-
-      const payload = buildCallEventPayload(call, {
-        declined_by: data.recipient_id,
-        timestamp: endedAt.toISOString(),
-        participant_status: 'declined',
-      });
-
-      const caller = getOnlineUser(call.caller_id);
-      if (caller) {
-        io.to(caller.socketId).emit('call_declined', payload);
-      }
-
-      socket.emit('call_declined', payload);
-      activeCalls.delete(data.callId);
     })().catch(error => {
       console.error('Failed to persist declined call:', error);
-      socket.emit('call_error', {error: 'Failed to decline call'});
     });
   }
 
   function handleEndCall(socket, data) {
-    const call = activeCalls.get(data.callId);
+    let call = activeCalls.get(data.callId);
+    if (!call && data.user_id) {
+      call = getExistingActiveCallForUser(data.user_id);
+    }
     if (!call) {
       socket.emit('call_error', {error: 'Call not found'});
       return;
     }
 
-    (async () => {
-      const endTime = new Date();
-      const isRinging = call.status === 'ringing';
-      const isCaller = String(data.user_id) === String(call.caller_id);
-      const endedStatus = isRinging ? 'missed' : 'completed';
-      const duration = call.answer_time
-        ? Math.floor((endTime - call.answer_time) / 1000)
-        : 0;
+    const callId = call.callId;
+    const endTime = new Date();
+    const isRinging = call.status === 'ringing';
+    const isCaller = String(data.user_id) === String(call.caller_id);
+    const endedStatus = isRinging ? 'missed' : 'completed';
+    const duration = call.answer_time
+      ? Math.floor((endTime - call.answer_time) / 1000)
+      : 0;
 
-      await updateCallRecord(call, {
-        status: endedStatus,
-        endedAt: endTime,
-        duration,
-      });
-      await updateCallParticipant(call.dbCallId, data.user_id, 'left', {
-        leftAt: endTime,
-      });
-      await updateCallParticipant(
-        call.dbCallId,
-        getOtherParticipant(call, data.user_id),
-        'left',
-        {leftAt: endTime},
-      );
+    // Immediately mark call as ended and remove from activeCalls map
+    setCallStatus(call, endedStatus);
+    activeCalls.delete(callId);
+
+    const payload = buildCallEventPayload(call, {
+      ended_by: data.user_id,
+      duration,
+      timestamp: endTime.toISOString(),
+      participant_status: 'left',
+    });
+
+    // Notify caller/initiator of end immediately
+    socket.emit('call_ended', payload);
+
+    // Notify other participant immediately
+    const otherUserId = getOtherParticipant(call, data.user_id);
+    const otherUser = getActiveUser(otherUserId);
+    if (otherUser) {
+      if (isRinging && isCaller) {
+        io.to(otherUser.socketId).emit('call_missed', payload);
+        io.to(otherUser.socketId).emit('call_ended', payload);
+      } else {
+        io.to(otherUser.socketId).emit('call_ended', payload);
+      }
+    }
+
+    // Also broadcast to the conversation room so any active screen in the conversation terminates immediately
+    if (call.conversation_id) {
+      if (isRinging && isCaller) {
+        io.to(String(call.conversation_id)).emit('call_missed', payload);
+        io.to(String(call.conversation_id)).emit('call_ended', payload);
+      } else {
+        io.to(String(call.conversation_id)).emit('call_ended', payload);
+      }
+    }
+
+    // Immediately send call push without waiting for DB logging!
+    if (isRinging && isCaller) {
+      sendMissedCallPush(call);
+      sendCallEndedPush(call, data.user_id);
+    } else {
+      sendCallEndedPush(call, data.user_id);
+    }
+
+    // Persist to DB and send push notification asynchronously in background
+    (async () => {
+      if (call.dbCallId) {
+        await updateCallRecord(call, {
+          status: endedStatus,
+          endedAt: endTime,
+          duration,
+        });
+        await updateCallParticipant(call.dbCallId, data.user_id, 'left', {
+          leftAt: endTime,
+        });
+        await updateCallParticipant(
+          call.dbCallId,
+          otherUserId,
+          'left',
+          {leftAt: endTime},
+        );
+      }
 
       await logCallAsMessage(call);
-
-      const payload = buildCallEventPayload(call, {
-        ended_by: data.user_id,
-        duration,
-        timestamp: endTime.toISOString(),
-        participant_status: 'left',
-      });
-
-      const otherUserId = getOtherParticipant(call, data.user_id);
-      const otherUser = getOnlineUser(otherUserId);
-      if (otherUser) {
-        if (isRinging && isCaller) {
-          io.to(otherUser.socketId).emit('call_missed', payload);
-        } else {
-          io.to(otherUser.socketId).emit('call_ended', payload);
-        }
-      }
-
-      if (isRinging && isCaller) {
-        await sendMissedCallPush(call);
-      } else {
-        await sendCallEndedPush(call, data.user_id);
-      }
-
-      socket.emit('call_ended', payload);
-      activeCalls.delete(data.callId);
     })().catch(error => {
       console.error('Failed to persist ended call:', error);
-      socket.emit('call_error', {error: 'Failed to end call'});
     });
   }
 
@@ -783,7 +852,7 @@ function createCallService({io, queryDb, socketState, pushService, messageServic
       return;
     }
 
-    const targetUser = getOnlineUser(getOtherParticipant(call, data.sender_id));
+    const targetUser = getActiveUser(getOtherParticipant(call, data.sender_id));
     if (!targetUser) {
       console.log(`Target user not found for ${eventName}`);
       return;
