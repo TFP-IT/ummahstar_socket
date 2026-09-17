@@ -662,8 +662,9 @@ function createCallService({io, queryDb, socketState, pushService, messageServic
       return;
     }
 
-    // 4. Notify recipient via socket AND dispatch push so locked/sleeping devices wake up immediately
+    // 4. Notify recipient via socket if online, otherwise send push notification
     if (recipient) {
+      // Recipient is connected via socket — send socket event only, no push needed
       io.to(recipient.socketId).emit(
         'incoming_call',
         buildCallEventPayload(callInfo, {
@@ -671,12 +672,14 @@ function createCallService({io, queryDb, socketState, pushService, messageServic
           participant_status: 'invited',
         }),
       );
+      console.log(`[handleInitiateCall] Recipient ${data.recipient_id} is online — socket event sent, push skipped`);
+    } else {
+      // Recipient is offline/background — send push notification to wake device
+      console.log(`[handleInitiateCall] Recipient ${data.recipient_id} is offline — sending push notification`);
+      handleOfflineIncomingCall(callInfo).catch(err => {
+        console.error('Error sending incoming call push:', err);
+      });
     }
-
-    // Always dispatch incoming call push to wake up device if locked/in background
-    handleOfflineIncomingCall(callInfo).catch(err => {
-      console.error('Error sending incoming call push:', err);
-    });
 
     scheduleUnansweredCallTimeout(socket, callInfo);
   }
