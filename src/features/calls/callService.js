@@ -354,6 +354,15 @@ function createCallService({io, queryDb, socketState, pushService, messageServic
     );
 
     affectedCalls.forEach(([callId, call]) => {
+      // If user temporarily disconnected (e.g. app swiped from background/recents or network switch)
+      // and call is currently ringing, do NOT immediately destroy the call session.
+      // The incoming/ringing session is maintained via persistent foreground service/FCM
+      // and will either be answered, declined, or timed out via scheduleUnansweredCallTimeout.
+      if (reason === 'disconnect' && call.status === 'ringing') {
+        console.log(`[cleanupUserCalls] Preserving ringing call ${callId} for user ${userId} during socket disconnect.`);
+        return;
+      }
+
       activeCalls.delete(callId);
       setCallStatus(call, reason === 'disconnect' ? 'missed' : 'completed');
 
