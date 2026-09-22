@@ -6,6 +6,7 @@ function createDbConnection(env) {
     user: env.DB_USER,
     password: env.DB_PASS,
     database: env.DB_NAME,
+    timezone: '+00:00',
   });
 }
 
@@ -16,6 +17,13 @@ function connectDb(db) {
     }
 
     console.log('MySQL database connected');
+    db.query("SET time_zone = '+00:00'", err => {
+      if (err) {
+        console.error('Failed to set time_zone to +00:00:', err);
+      } else {
+        console.log('MySQL session time_zone set to +00:00 (UTC)');
+      }
+    });
   });
 }
 

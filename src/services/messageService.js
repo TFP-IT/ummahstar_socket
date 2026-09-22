@@ -1,3 +1,7 @@
+const moment = require('moment');
+
+const getUtcNow = () => moment.utc().format('YYYY-MM-DD HH:mm:ss');
+
 function createMessageService({queryDb}) {
   async function saveMessage(message) {
     const {
@@ -10,6 +14,8 @@ function createMessageService({queryDb}) {
       metadata = null,
       reply_to = null,
     } = message;
+
+    const now = getUtcNow();
 
     const result = await queryDb(
       `
@@ -26,7 +32,7 @@ function createMessageService({queryDb}) {
           created_at,
           updated_at
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, NOW(), NOW())
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)
       `,
       [
         uuid,
@@ -37,10 +43,12 @@ function createMessageService({queryDb}) {
         message_type,
         metadata,
         reply_to,
+        now,
+        now,
       ],
     );
 
-    return {id: result.insertId, ...message};
+    return {id: result.insertId, ...message, created_at: new Date().toISOString(), updated_at: new Date().toISOString()};
   }
 
   async function saveMessageStatus(messageId, userId, status, callerContext = {}) {
@@ -63,6 +71,7 @@ function createMessageService({queryDb}) {
       return;
     }
 
+    const now = getUtcNow();
     await queryDb(
       `
         INSERT INTO message_status (
@@ -73,13 +82,13 @@ function createMessageService({queryDb}) {
           created_at,
           updated_at
         )
-        VALUES (?, ?, ?, NOW(), NOW(), NOW())
+        VALUES (?, ?, ?, ?, ?, ?)
         ON DUPLICATE KEY UPDATE
           status = VALUES(status),
           status_at = VALUES(status_at),
           updated_at = VALUES(updated_at)
       `,
-      [messageId, userId, status],
+      [messageId, userId, status, now, now, now],
     );
   }
 
@@ -118,13 +127,14 @@ function createMessageService({queryDb}) {
     if (!conversationId) return;
 
     try {
+      const now = getUtcNow();
       await queryDb(
         `
           UPDATE conversations
-          SET updated_at = NOW()
+          SET updated_at = ?
           WHERE id = ?
         `,
-        [conversationId],
+        [now, conversationId],
       );
     } catch (error) {
       console.error('Failed to update conversation timestamp:', error);

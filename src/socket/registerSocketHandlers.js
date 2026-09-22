@@ -217,14 +217,14 @@ function registerSocketHandlers({io, socketState, services}) {
           id: savedMessage.id,
           conversation_id: savedMessage.conversation_id,
           status: 'sent',
-          created_at: new Date().toISOString(),
+          created_at: savedMessage.created_at,
         });
 
         await messageService.updateConversationTimestamp(message.conversation_id);
 
         io.to(message.conversation_id).emit('receive_message', {
           ...savedMessage,
-          created_at: new Date().toISOString(),
+          created_at: savedMessage.created_at,
         });
 
         try {
