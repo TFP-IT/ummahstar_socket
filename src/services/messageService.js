@@ -177,11 +177,32 @@ function createMessageService({queryDb}) {
       .reverse();
   }
 
+  async function fetchConversationEncryptionKey(conversationId) {
+    if (!conversationId) return null;
+
+    try {
+      const rows = await queryDb(
+        `
+          SELECT encryption_key
+          FROM conversations
+          WHERE id = ?
+          LIMIT 1
+        `,
+        [conversationId],
+      );
+      return rows[0]?.encryption_key || null;
+    } catch (error) {
+      console.error('Failed to fetch conversation encryption key:', error);
+      return null;
+    }
+  }
+
   return {
     saveMessage,
     saveMessageStatus,
     fetchMessageSender,
     fetchConversationRecipients,
+    fetchConversationEncryptionKey,
     updateConversationTimestamp,
     fetchMessageHistory,
   };

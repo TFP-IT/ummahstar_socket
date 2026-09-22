@@ -236,6 +236,11 @@ function registerSocketHandlers({io, socketState, services}) {
             String(message?.sender_name || '').trim() || 'New message';
           const pushBody = buildMessagePushBody(savedMessage);
 
+          const encryptionKey =
+            (await messageService.fetchConversationEncryptionKey(
+              message.conversation_id,
+            )) || '';
+
           await Promise.all(
             recipients.map(async recipient => {
               if (
@@ -253,11 +258,12 @@ function registerSocketHandlers({io, socketState, services}) {
                 pushBody,
                 {
                   type: 'chat_message',
-                  conversation_id: message.conversation_id,
-                  sender_id: message.user_id,
+                  conversation_id: String(message.conversation_id),
+                  sender_id: String(message.user_id),
                   sender_name: senderName,
-                  message_id: savedMessage.id,
-                  message_type: savedMessage.message_type,
+                  message_id: String(savedMessage.id),
+                  message_type: String(savedMessage.message_type || 'text'),
+                  encryption_key: String(encryptionKey),
                 },
                 {
                   channelId: 'promo-notifaiction',
