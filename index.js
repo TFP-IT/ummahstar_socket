@@ -21,6 +21,7 @@ const {createLiveStreamService, createWorkers} = require('./src/features/liveStr
 const {createLiveStreamState} = require('./src/features/liveStream/liveStreamState');
 const {registerSocketHandlers} = require('./src/socket/registerSocketHandlers');
 const {createHalaqaCronService} = require('./src/services/halaqaCronService');
+const {createMashwaraCronService} = require('./src/services/mashwaraCronService');
 
 
 const app = express();
@@ -53,11 +54,21 @@ const services = {
   callService: null,
   qnaService: createQnaService({queryDb, io}),
   halaqaCronService: null,
+  mashwaraCronService: null,
 };
 
 services.halaqaCronService = createHalaqaCronService({
   queryDb,
   pushService: services.pushService,
+});
+
+services.mashwaraCronService = createMashwaraCronService({
+  queryDb,
+  pushService: services.pushService,
+  io,
+  socketState,
+  reminderMinutes: [10, 5, 1, 0],
+  checkIntervalMs: 30 * 1000,
 });
 
 services.callService = createCallService({
