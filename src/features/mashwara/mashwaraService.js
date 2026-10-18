@@ -208,6 +208,7 @@ function createMashwaraService({io, mashwaraState, socketState, pushService, que
     room.historyMeta = meta;
     room.liveChatId = data.liveChatId ?? data.live_chat_id ?? data.mashwaraId ?? data.mashwara_id ?? null;
     room.registrationId = data.registrationId ?? data.registration_id ?? null;
+    room.takenTime = data.takenTime ?? data.taken_time ?? null;
 
     return result.insertId;
   }
@@ -652,23 +653,33 @@ function createMashwaraService({io, mashwaraState, socketState, pushService, que
     const billableMinutes = toBillableMinutes(durationSeconds);
     const totalFee = Number((billableMinutes * toMoney(room.feePerMinute)).toFixed(2));
 
+    const isTimeFinished =
+      Boolean(data?.isTimeUp) ||
+      Boolean(data?.isSessionComplete) ||
+      data?.reason === 'time_expired' ||
+      data?.reason === 'time_up' ||
+      (room.scheduledEndTime && endedAt >= new Date(room.scheduledEndTime.getTime() - 15000)) ||
+      (room.takenTime && durationSeconds >= (Number(room.takenTime) * 60 - 15));
+
     updateHistoryRecord(room, {
       status: 'ended',
       endedAt,
       durationSeconds,
       billableMinutes,
       totalFee,
-      endReason: 'host_ended',
+      endReason: isTimeFinished ? 'time_expired' : (data?.reason || 'host_ended'),
       meta: {
         endedByUserId: String(hostUserId),
         endedByRole: 'host',
-        endSource: 'end_session',
+        endSource: isTimeFinished ? 'time_expired' : 'end_session',
       },
     })
       .then(async () => {
         const isCallStarted = room.startedAt || room.joinedAt || room.answeredAt;
-        if (isCallStarted) {
+        if (isCallStarted && isTimeFinished) {
           await updateSlotCompleted(room);
+        } else {
+          console.log(`[Mashwara] Session ended without slot completion (duration=${durationSeconds}s, isTimeFinished=${isTimeFinished})`);
         }
       })
       .catch(error => {
@@ -682,7 +693,8 @@ function createMashwaraService({io, mashwaraState, socketState, pushService, que
         io.to(String(sessionId)).emit('mashwara_session_ended', {
           sessionId: String(sessionId),
           endedBy: String(hostUserId),
-          reason: 'host_ended',
+          reason: isTimeFinished ? 'time_expired' : (data?.reason || 'host_ended'),
+          isTimeUp: isTimeFinished,
           timestamp: endedAt.toISOString(),
         });
 
@@ -777,7 +789,13 @@ function createMashwaraService({io, mashwaraState, socketState, pushService, que
               ? 'failed'
               : 'ended';
 
-        // Payout release is disabled.
+        const isTimeFinished =
+          Boolean(data?.isTimeUp) ||
+          Boolean(data?.isSessionComplete) ||
+          reason === 'time_expired' ||
+          reason === 'time_up' ||
+          (currentRoom.scheduledEndTime && endedAt >= new Date(currentRoom.scheduledEndTime.getTime() - 15000)) ||
+          (currentRoom.takenTime && durationSeconds >= (Number(currentRoom.takenTime) * 60 - 15));
 
         updateHistoryRecord(currentRoom, {
           status: historyStatus,
@@ -789,19 +807,21 @@ function createMashwaraService({io, mashwaraState, socketState, pushService, que
           durationSeconds,
           billableMinutes,
           totalFee,
-          endReason: finalReason,
+          endReason: isTimeFinished ? 'time_expired' : finalReason,
           failureReason: finalReason.includes('disconnected') ? 'socket_disconnect' : null,
           meta: {
             endedByUserId: String(userId),
             endedByRole: isHost ? 'host' : 'participant',
-            endSource: reason,
+            endSource: isTimeFinished ? 'time_expired' : reason,
             remainingParticipantCount: currentRoom.participants.size,
           },
         })
           .then(async () => {
             const isCallStarted = currentRoom.startedAt || currentRoom.joinedAt || currentRoom.answeredAt;
-            if (isCallStarted) {
+            if (isCallStarted && isTimeFinished) {
               await updateSlotCompleted(currentRoom);
+            } else {
+              console.log(`[Mashwara] Participant left without slot completion (duration=${durationSeconds}s, isTimeFinished=${isTimeFinished})`);
             }
           })
           .catch(error => {
@@ -811,7 +831,8 @@ function createMashwaraService({io, mashwaraState, socketState, pushService, que
             io.to(String(sessionId)).emit('mashwara_session_ended', {
               sessionId: String(sessionId),
               endedBy: String(userId),
-              reason: finalReason,
+              reason: isTimeFinished ? 'time_expired' : finalReason,
+              isTimeUp: isTimeFinished,
               timestamp: endedAt.toISOString(),
             });
             deleteRoom(sessionId);
