@@ -417,6 +417,49 @@ function createMashwaraService({io, mashwaraState, socketState, pushService, que
     }
   }
 
+  async function notifyParticipantCallCancelled({sessionId, hostUserId, remoteUserId, reason = 'caller_cancelled'}) {
+    const targetUserId = remoteUserId;
+    if (!targetUserId) return;
+
+    const payload = {
+      type: 'mashwara_call_cancelled',
+      sessionId: String(sessionId),
+      caller_id: String(hostUserId),
+      reason,
+      timestamp: new Date().toISOString(),
+    };
+
+    // 1. Direct socket emit if online
+    const recipient =
+      socketState.getOnlineUser(targetUserId) ||
+      socketState.getConnectedUser?.(targetUserId);
+
+    if (recipient?.socketId) {
+      emitToParticipant(recipient.socketId, 'mashwara_call_cancelled', payload);
+      emitToParticipant(recipient.socketId, 'mashwara_session_ended', payload);
+    }
+
+    // 2. Push notification to immediately dismiss ringing heads-up notification on Android
+    if (pushService && queryDb) {
+      try {
+        const rows = await queryDb(
+          'SELECT device_id FROM users WHERE id = ? LIMIT 1',
+          [targetUserId],
+        );
+        if (rows?.[0]?.device_id) {
+          await pushService.sendPushToToken(
+            rows[0].device_id,
+            'Call Cancelled',
+            'Mashwara call was cancelled',
+            payload,
+          );
+        }
+      } catch (err) {
+        console.error('[Mashwara] Failed to send cancel push:', err);
+      }
+    }
+  }
+
   async function handleCreateRoom(socket, data, callback) {
     const {sessionId, userId, displayName, remoteUserId} = data || {};
 
@@ -430,11 +473,21 @@ function createMashwaraService({io, mashwaraState, socketState, pushService, que
       }
 
       if (hasRoom(sessionId)) {
-        return callback({
-          success: false,
-          error: 'Room already exists. Use mashwara_join_room.',
-          message: 'Room already exists. Use mashwara_join_room.',
-        });
+        const existing = getRoom(sessionId);
+        if (
+          existing &&
+          String(existing.hostUserId) === String(userId) &&
+          (!existing.remoteUserId || !existing.participants.has(String(existing.remoteUserId)))
+        ) {
+          // Re-create/clean room so the host can re-call the user without 'Room already exists' error
+          deleteRoom(sessionId);
+        } else {
+          return callback({
+            success: false,
+            error: 'Room already exists. Use mashwara_join_room.',
+            message: 'Room already exists. Use mashwara_join_room.',
+          });
+        }
       }
 
       const room = createRoom(sessionId, userId, {remoteUserId});
@@ -513,6 +566,16 @@ function createMashwaraService({io, mashwaraState, socketState, pushService, que
       });
 
       socket.join(String(sessionId));
+
+      if (isHost && room.remoteUserId && !room.participants.has(String(room.remoteUserId))) {
+        notifyIncomingCall({
+          sessionId,
+          userId,
+          displayName,
+          remoteUserId: room.remoteUserId,
+          data,
+        }).catch(err => console.error('[Mashwara] re-notify incoming call error:', err));
+      }
 
       const joinedAt = new Date();
       const shouldMarkAnswered =
@@ -694,6 +757,15 @@ function createMashwaraService({io, mashwaraState, socketState, pushService, que
         // the host has explicitly ended the session.
         cancelReconnectTimer(sessionId);
 
+        if (room.remoteUserId && !room.participants.has(String(room.remoteUserId))) {
+          notifyParticipantCallCancelled({
+            sessionId,
+            hostUserId,
+            remoteUserId: room.remoteUserId,
+            reason: 'caller_cancelled',
+          }).catch(err => console.error('[Mashwara] cancel notify error:', err));
+        }
+
         io.to(String(sessionId)).emit('mashwara_session_ended', {
           sessionId: String(sessionId),
           endedBy: String(hostUserId),
@@ -861,6 +933,15 @@ function createMashwaraService({io, mashwaraState, socketState, pushService, que
             console.error('[Mashwara] Failed to persist leave/disconnect history:', error);
           })
           .finally(() => {
+            if (isHost && currentRoom.remoteUserId && !currentRoom.answeredAt) {
+              notifyParticipantCallCancelled({
+                sessionId,
+                hostUserId: userId,
+                remoteUserId: currentRoom.remoteUserId,
+                reason: 'caller_cancelled',
+              }).catch(err => console.error('[Mashwara] leave cancel notify error:', err));
+            }
+
             io.to(String(sessionId)).emit('mashwara_session_ended', {
               sessionId: String(sessionId),
               endedBy: String(userId),
