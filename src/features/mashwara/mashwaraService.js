@@ -362,11 +362,27 @@ function createMashwaraService({io, mashwaraState, socketState, pushService, que
       socketState.getOnlineUser(remoteUserId) ||
       socketState.getConnectedUser?.(remoteUserId);
 
+    let callerImage = data.avatar || data.image || data.userImage || null;
+    if (!callerImage && queryDb && userId) {
+      try {
+        const rows = await queryDb('SELECT image FROM users WHERE id = ? LIMIT 1', [userId]);
+        if (rows?.[0]?.image) {
+          callerImage = rows[0].image;
+        }
+      } catch (e) {
+        console.error('[Mashwara] Failed to resolve host image from DB:', e);
+      }
+    }
+
     const payload = {
       sessionId: String(sessionId),
       caller_id: userId,
       caller_name: displayName || 'Someone',
-      caller_image: data.avatar || data.image || data.userImage || null,
+      caller_image: callerImage,
+      caller_avatar: callerImage,
+      avatar: callerImage,
+      image: callerImage,
+      remoteImage: callerImage,
       callType: data.callType || data.call_type || 'mashwaraAudio',
       registrationId: data.registrationId ?? data.registration_id ?? null,
       liveChatId:
@@ -509,10 +525,20 @@ function createMashwaraService({io, mashwaraState, socketState, pushService, que
       }
 
       const room = createRoom(sessionId, userId, {remoteUserId});
+      let hostAvatar = data.avatar || data.image || null;
+      if (!hostAvatar && queryDb && userId) {
+        try {
+          const userRows = await queryDb('SELECT image FROM users WHERE id = ? LIMIT 1', [userId]);
+          if (userRows?.[0]?.image) {
+            hostAvatar = userRows[0].image;
+          }
+        } catch (e) {}
+      }
+
       addParticipant(sessionId, userId, {
         socketId: socket.id,
         displayName: displayName || 'Host',
-        avatar: data.avatar || data.image || null,
+        avatar: hostAvatar,
         audioMuted: false,
         videoMuted: normalizeCallMode(data.callType || data.call_type) !== 'video',
       });
@@ -538,7 +564,7 @@ function createMashwaraService({io, mashwaraState, socketState, pushService, que
     }
   }
 
-  function handleJoinRoom(socket, data, callback) {
+  async function handleJoinRoom(socket, data, callback) {
     // If the user is rejoining after a disconnect, cancel any pending teardown.
     cancelReconnectTimer((data || {}).sessionId);
     const {sessionId, userId, displayName} = data || {};
@@ -575,10 +601,20 @@ function createMashwaraService({io, mashwaraState, socketState, pushService, que
         });
       }
 
+      let guestAvatar = data.avatar || data.image || null;
+      if (!guestAvatar && queryDb && userId) {
+        try {
+          const userRows = await queryDb('SELECT image FROM users WHERE id = ? LIMIT 1', [userId]);
+          if (userRows?.[0]?.image) {
+            guestAvatar = userRows[0].image;
+          }
+        } catch (e) {}
+      }
+
       addParticipant(sessionId, userId, {
         socketId: socket.id,
         displayName: displayName || 'Guest',
-        avatar: data.avatar || data.image || null,
+        avatar: guestAvatar,
         audioMuted: Boolean(data.audioMuted),
         videoMuted: Boolean(data.videoMuted),
       });
@@ -622,7 +658,8 @@ function createMashwaraService({io, mashwaraState, socketState, pushService, que
         sessionId: String(sessionId),
         userId: String(userId),
         displayName: displayName || 'Guest',
-        avatar: data.avatar || data.image || null,
+        avatar: guestAvatar,
+        image: guestAvatar,
         audioMuted: Boolean(data.audioMuted),
         videoMuted: Boolean(data.videoMuted),
         participants: getParticipantList(sessionId),
