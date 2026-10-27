@@ -36,6 +36,7 @@ function createMashwaraState() {
       userId: String(userId),
       socketId: info.socketId || null,
       displayName: info.displayName || 'User',
+      avatar: info.avatar || info.image || null,
       audioMuted: Boolean(info.audioMuted),
       videoMuted: Boolean(info.videoMuted),
       joinedAt: new Date(),

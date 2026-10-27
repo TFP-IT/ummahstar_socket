@@ -366,6 +366,7 @@ function createMashwaraService({io, mashwaraState, socketState, pushService, que
       sessionId: String(sessionId),
       caller_id: userId,
       caller_name: displayName || 'Someone',
+      caller_image: data.avatar || data.image || data.userImage || null,
       callType: data.callType || data.call_type || 'mashwaraAudio',
       registrationId: data.registrationId ?? data.registration_id ?? null,
       liveChatId:
@@ -440,6 +441,7 @@ function createMashwaraService({io, mashwaraState, socketState, pushService, que
       addParticipant(sessionId, userId, {
         socketId: socket.id,
         displayName: displayName || 'Host',
+        avatar: data.avatar || data.image || null,
         audioMuted: false,
         videoMuted: normalizeCallMode(data.callType || data.call_type) !== 'video',
       });
@@ -505,6 +507,7 @@ function createMashwaraService({io, mashwaraState, socketState, pushService, que
       addParticipant(sessionId, userId, {
         socketId: socket.id,
         displayName: displayName || 'Guest',
+        avatar: data.avatar || data.image || null,
         audioMuted: Boolean(data.audioMuted),
         videoMuted: Boolean(data.videoMuted),
       });
@@ -538,6 +541,7 @@ function createMashwaraService({io, mashwaraState, socketState, pushService, que
         sessionId: String(sessionId),
         userId: String(userId),
         displayName: displayName || 'Guest',
+        avatar: data.avatar || data.image || null,
         audioMuted: Boolean(data.audioMuted),
         videoMuted: Boolean(data.videoMuted),
         participants: getParticipantList(sessionId),
