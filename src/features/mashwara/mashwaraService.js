@@ -708,43 +708,72 @@ function createMashwaraService({io, mashwaraState, socketState, pushService, que
   }
 
   function handleDeclineCall(socket, data) {
-    const {sessionId, recipient_id} = data || {};
-    const room = getRoom(sessionId);
-    if (!room) {
-      return;
-    }
+    const {sessionId, recipient_id, caller_id} = data || {};
+    const room = sessionId ? getRoom(sessionId) : null;
+    const hostId = room ? room.hostUserId : caller_id;
 
     const endedAt = new Date();
-    const ringDurationSeconds = toWholeSeconds(room.ringingAt || room.initiatedAt, endedAt);
-    const isHostDeclined = String(recipient_id) === String(room.hostUserId);
+    const ringDurationSeconds = room
+      ? toWholeSeconds(room.ringingAt || room.initiatedAt, endedAt)
+      : 0;
+    const isHostDeclined = hostId && String(recipient_id) === String(hostId);
 
-    updateHistoryRecord(room, {
-      receiverUserId: recipient_id,
-      status: 'declined',
-      endedAt,
-      ringDurationSeconds,
-      endReason: 'declined',
-      meta: {
-        endedByUserId: String(recipient_id),
-        endedByRole:
-          isHostDeclined ? 'host' : 'participant',
-        endSource: 'decline',
-      },
-    })
-      .catch(error => {
-        console.error('[Mashwara] Failed to persist declined session history:', error);
-      })
-      .finally(() => {
-        io.to(String(sessionId)).emit('mashwara_session_ended', {
-          sessionId: String(sessionId),
-          endedBy: String(recipient_id),
-          reason: 'declined',
-          timestamp: endedAt.toISOString(),
-        });
+    const emitDeclineEvents = () => {
+      const payload = {
+        sessionId: sessionId ? String(sessionId) : null,
+        endedBy: String(recipient_id),
+        reason: 'declined',
+        timestamp: endedAt.toISOString(),
+      };
 
+      if (sessionId) {
+        io.to(String(sessionId)).emit('mashwara_session_ended', payload);
+        io.to(String(sessionId)).emit('mashwara_call_declined', payload);
+      }
+
+      // Also directly notify host's active socket if targetHostId is known
+      const targetHostId = hostId || caller_id;
+      if (targetHostId) {
+        const callerOnline =
+          socketState.getOnlineUser(targetHostId) ||
+          socketState.getConnectedUser?.(targetHostId);
+        if (callerOnline?.socketId) {
+          io.to(callerOnline.socketId).emit('mashwara_session_ended', payload);
+          io.to(callerOnline.socketId).emit('mashwara_call_declined', payload);
+        }
+      }
+
+      // Echo back to decliner socket
+      socket.emit('mashwara_call_declined', payload);
+
+      if (sessionId) {
         deleteRoom(sessionId);
         io.socketsLeave(String(sessionId));
-      });
+      }
+    };
+
+    if (room) {
+      updateHistoryRecord(room, {
+        receiverUserId: recipient_id,
+        status: 'declined',
+        endedAt,
+        ringDurationSeconds,
+        endReason: 'declined',
+        meta: {
+          endedByUserId: String(recipient_id),
+          endedByRole: isHostDeclined ? 'host' : 'participant',
+          endSource: 'decline',
+        },
+      })
+        .catch(error => {
+          console.error('[Mashwara] Failed to persist declined session history:', error);
+        })
+        .finally(() => {
+          emitDeclineEvents();
+        });
+    } else {
+      emitDeclineEvents();
+    }
   }
 
   function handleLeaveRoom(socket, data, reason = 'left') {
@@ -762,22 +791,30 @@ function createMashwaraService({io, mashwaraState, socketState, pushService, que
     removeParticipant(sessionId, userId);
     socket.leave(String(sessionId));
 
-    if (room.participants.size <= 1) {
+    const isTimeFinished =
+      Boolean(data?.isTimeUp) ||
+      Boolean(data?.isSessionComplete) ||
+      reason === 'time_expired' ||
+      reason === 'time_up';
+
+    // Teardown the room ONLY IF:
+    // 1) The host left or disconnected, OR
+    // 2) No participants remain in the room (0 participants), OR
+    // 3) The scheduled session time is expired/completed.
+    // If a participant leaves while the host is still in the room, DO NOT teardown!
+    // The host stays in the call independently without disconnecting.
+    if (isHost || room.participants.size === 0 || isTimeFinished) {
       const finalReason =
         reason === 'disconnect'
           ? (isHost ? 'host_disconnected' : 'participant_disconnected')
-          : (isHost ? 'host_left' : 'participant_left');
+          : (isHost ? 'host_left' : (isTimeFinished ? 'time_expired' : 'participant_left'));
 
-      // For intentional leaves (host_left / participant_left) end immediately.
-      // For unexpected disconnects, wait RECONNECT_GRACE_MS before tearing
-      // down so the client can reconnect and rejoin without losing the session.
       const isUnexpectedDisconnect = reason === 'disconnect';
 
       const doTeardown = () => {
-        // Re-check the room still exists and is still nearly empty.
         const currentRoom = getRoom(sessionId);
         if (!currentRoom) {
-          return; // Already cleaned up (e.g. explicit end_session fired first).
+          return;
         }
 
         reconnectTimers.delete(String(sessionId));
@@ -792,14 +829,6 @@ function createMashwaraService({io, mashwaraState, socketState, pushService, que
             : finalReason.includes('disconnected')
               ? 'failed'
               : 'ended';
-
-        const isTimeFinished =
-          Boolean(data?.isTimeUp) ||
-          Boolean(data?.isSessionComplete) ||
-          reason === 'time_expired' ||
-          reason === 'time_up' ||
-          (currentRoom.scheduledEndTime && endedAt >= new Date(currentRoom.scheduledEndTime.getTime() - 15000)) ||
-          (currentRoom.takenTime && durationSeconds >= (Number(currentRoom.takenTime) * 60 - 15));
 
         updateHistoryRecord(currentRoom, {
           status: historyStatus,
@@ -825,7 +854,7 @@ function createMashwaraService({io, mashwaraState, socketState, pushService, que
             if (isCallStarted && isTimeFinished) {
               await updateSlotCompleted(currentRoom);
             } else {
-              console.log(`[Mashwara] Participant left without slot completion (duration=${durationSeconds}s, isTimeFinished=${isTimeFinished})`);
+              console.log(`[Mashwara] Participant/host left without slot completion (duration=${durationSeconds}s, isTimeFinished=${isTimeFinished})`);
             }
           })
           .catch(error => {
@@ -844,29 +873,29 @@ function createMashwaraService({io, mashwaraState, socketState, pushService, que
           });
       };
 
-      if (isUnexpectedDisconnect) {
-        // Cancel any existing timer for this session (e.g. both sides disconnect
-        // at the same time) and schedule a fresh one.
+      if (isUnexpectedDisconnect && isHost) {
         cancelReconnectTimer(sessionId);
         console.log(
-          `[Mashwara] Disconnect grace period started for session ${sessionId} (user ${userId}, ${RECONNECT_GRACE_MS}ms)`,
+          `[Mashwara] Disconnect grace period started for session ${sessionId} (host ${userId}, ${RECONNECT_GRACE_MS}ms)`,
         );
         const timer = setTimeout(doTeardown, RECONNECT_GRACE_MS);
         reconnectTimers.set(String(sessionId), timer);
       } else {
-        // Intentional leave — end immediately.
         doTeardown();
       }
       return;
     }
 
-    emitToOtherParticipants(room, userId, 'mashwara_participant_left', {
+    // Participant left while host is still in the room
+    const leftPayload = {
       sessionId: String(sessionId),
       userId: String(userId),
       reason,
       participants: getParticipantList(sessionId),
       timestamp: new Date().toISOString(),
-    });
+    };
+    emitToOtherParticipants(room, userId, 'mashwara_participant_left', leftPayload);
+    io.to(String(sessionId)).emit('mashwara_participant_left', leftPayload);
   }
 
   function handleSocketDisconnect(socket, socketUserId) {
