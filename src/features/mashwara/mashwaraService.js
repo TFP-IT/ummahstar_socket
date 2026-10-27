@@ -3,7 +3,7 @@ function createMashwaraService({io, mashwaraState, socketState, pushService, que
   // When a participant disconnects unexpectedly we wait RECONNECT_GRACE_MS
   // before firing mashwara_session_ended so they can rejoin on reconnect.
   const reconnectTimers = new Map();
-  const RECONNECT_GRACE_MS = 15000; // 15 s grace period
+  const RECONNECT_GRACE_MS = 30000; // 30 s grace period
 
   function cancelReconnectTimer(sessionId) {
     const timer = reconnectTimers.get(String(sessionId));
@@ -11,6 +11,41 @@ function createMashwaraService({io, mashwaraState, socketState, pushService, que
       clearTimeout(timer);
       reconnectTimers.delete(String(sessionId));
     }
+  }
+
+  function startSessionAutoEndTimer(sessionId) {
+    const room = getRoom(sessionId);
+    if (!room) {
+      return;
+    }
+    if (room.autoEndTimer) {
+      clearTimeout(room.autoEndTimer);
+      room.autoEndTimer = null;
+    }
+
+    const durationMinutes = Number(room.takenTime) > 0 ? Number(room.takenTime) : 30;
+    // 5 seconds buffer so client timer can trigger cleanly first
+    const autoEndMs = (durationMinutes * 60 + 5) * 1000;
+    console.log(
+      `[Mashwara] Scheduled server-side auto-end timer for session ${sessionId} (${durationMinutes} mins / ${autoEndMs} ms)`,
+    );
+
+    room.autoEndTimer = setTimeout(() => {
+      const activeRoom = getRoom(sessionId);
+      if (!activeRoom) {
+        return;
+      }
+      console.log(
+        `[Mashwara] Server auto-ending session ${sessionId}: scheduled session time expired`,
+      );
+      handleEndSession(null, {
+        sessionId: String(sessionId),
+        hostUserId: String(activeRoom.hostUserId),
+        isTimeUp: true,
+        isSessionComplete: true,
+        reason: 'time_expired',
+      });
+    }, autoEndMs);
   }
   const {
     createRoom,
@@ -508,12 +543,36 @@ function createMashwaraService({io, mashwaraState, socketState, pushService, que
 
       if (hasRoom(sessionId)) {
         const existing = getRoom(sessionId);
-        if (
-          existing &&
-          String(existing.hostUserId) === String(userId) &&
-          (!existing.remoteUserId || !existing.participants.has(String(existing.remoteUserId)))
-        ) {
-          // Re-create/clean room so the host can re-call the user without 'Room already exists' error
+        if (existing && String(existing.hostUserId) === String(userId)) {
+          cancelReconnectTimer(sessionId);
+          // If the call was already answered/active or reconnecting, update host socket and re-attach
+          if (existing.answeredAt || existing.participants.size > 0 || reconnectTimers.has(String(sessionId))) {
+            let hostAvatar = data.avatar || data.image || null;
+            if (!hostAvatar && queryDb && userId) {
+              try {
+                const userRows = await queryDb('SELECT image FROM users WHERE id = ? LIMIT 1', [userId]);
+                if (userRows?.[0]?.image) {
+                  hostAvatar = userRows[0].image;
+                }
+              } catch (e) {}
+            }
+            addParticipant(sessionId, userId, {
+              socketId: socket.id,
+              displayName: displayName || 'Host',
+              avatar: hostAvatar,
+              audioMuted: false,
+              videoMuted: normalizeCallMode(data.callType || data.call_type) !== 'video',
+            });
+            socket.join(String(sessionId));
+            return callback({
+              success: true,
+              sessionId: String(sessionId),
+              hostUserId: String(userId),
+              remoteUserId: existing.remoteUserId ? String(existing.remoteUserId) : null,
+              participants: getParticipantList(sessionId),
+            });
+          }
+          // Re-create/clean room so the host can re-call the user if it was never answered
           deleteRoom(sessionId);
         } else {
           return callback({
@@ -525,6 +584,20 @@ function createMashwaraService({io, mashwaraState, socketState, pushService, que
       }
 
       const room = createRoom(sessionId, userId, {remoteUserId});
+      let sessionTakenTime = Number(data.takenTime || data.taken_time) || null;
+      if (!sessionTakenTime && queryDb && (data.registrationId || data.registration_id)) {
+        try {
+          const regId = data.registrationId || data.registration_id;
+          const regRows = await queryDb('SELECT taken_time FROM live_chat_registrations WHERE id = ? LIMIT 1', [regId]);
+          if (regRows?.[0]?.taken_time) {
+            sessionTakenTime = Number(regRows[0].taken_time) || null;
+          }
+        } catch (e) {}
+      }
+      room.takenTime = sessionTakenTime || 30;
+      room.liveChatDate = data.liveChatDate || data.live_chat_date || null;
+      room.liveChatStartTime = data.liveChatStartTime || data.live_chat_start_time || null;
+      room.liveChatEndTime = data.liveChatEndTime || data.live_chat_end_time || null;
       let hostAvatar = data.avatar || data.image || null;
       if (!hostAvatar && queryDb && userId) {
         try {
@@ -639,6 +712,18 @@ function createMashwaraService({io, mashwaraState, socketState, pushService, que
       const ringDurationSeconds = shouldMarkAnswered
         ? toWholeSeconds(room.ringingAt || room.initiatedAt || room.startedAt, joinedAt)
         : room.ringDurationSeconds || 0;
+
+      if (shouldMarkAnswered) {
+        room.answeredAt = joinedAt;
+        room.startedAt = joinedAt;
+        if (data?.takenTime || data?.taken_time) {
+          const guestTaken = Number(data.takenTime || data.taken_time);
+          if (guestTaken > 0) {
+            room.takenTime = guestTaken;
+          }
+        }
+        startSessionAutoEndTimer(sessionId);
+      }
 
       const updateHistoryPromise = shouldMarkAnswered
         ? updateHistoryRecord(room, {
@@ -765,7 +850,12 @@ function createMashwaraService({io, mashwaraState, socketState, pushService, que
       return;
     }
 
-    if (String(room.hostUserId) !== String(hostUserId)) {
+    if (room.autoEndTimer) {
+      clearTimeout(room.autoEndTimer);
+      room.autoEndTimer = null;
+    }
+
+    if (socket && String(room.hostUserId) !== String(hostUserId)) {
       socket.emit('mashwara_error', {error: 'Only the host can end the session'});
       return;
     }
@@ -1009,10 +1099,10 @@ function createMashwaraService({io, mashwaraState, socketState, pushService, que
           });
       };
 
-      if (isUnexpectedDisconnect && isHost) {
+      if (isUnexpectedDisconnect) {
         cancelReconnectTimer(sessionId);
         console.log(
-          `[Mashwara] Disconnect grace period started for session ${sessionId} (host ${userId}, ${RECONNECT_GRACE_MS}ms)`,
+          `[Mashwara] Disconnect grace period started for session ${sessionId} (${isHost ? 'host' : 'participant'} ${userId}, ${RECONNECT_GRACE_MS}ms)`,
         );
         const timer = setTimeout(doTeardown, RECONNECT_GRACE_MS);
         reconnectTimers.set(String(sessionId), timer);

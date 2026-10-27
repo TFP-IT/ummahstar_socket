@@ -23,6 +23,11 @@ function createMashwaraState() {
   }
 
   function deleteRoom(sessionId) {
+    const room = rooms.get(String(sessionId));
+    if (room?.autoEndTimer) {
+      clearTimeout(room.autoEndTimer);
+      room.autoEndTimer = null;
+    }
     rooms.delete(String(sessionId));
   }
 
