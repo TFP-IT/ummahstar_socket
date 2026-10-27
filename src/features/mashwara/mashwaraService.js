@@ -421,10 +421,28 @@ function createMashwaraService({io, mashwaraState, socketState, pushService, que
     const targetUserId = remoteUserId;
     if (!targetUserId) return;
 
+    let hostName = 'Host';
+    if (queryDb && hostUserId) {
+      try {
+        const hostRows = await queryDb(
+          'SELECT first_name, last_name, username FROM users WHERE id = ? LIMIT 1',
+          [hostUserId],
+        );
+        if (hostRows?.[0]) {
+          const u = hostRows[0];
+          hostName = [u.first_name, u.last_name].filter(Boolean).join(' ').trim() || u.username || 'Host';
+        }
+      } catch (err) {
+        console.error('[Mashwara] Failed to resolve host name for cancel notification:', err);
+      }
+    }
+
     const payload = {
       type: 'mashwara_call_cancelled',
       sessionId: String(sessionId),
       caller_id: String(hostUserId),
+      caller_name: hostName,
+      status: 'missed',
       reason,
       timestamp: new Date().toISOString(),
     };
@@ -439,7 +457,7 @@ function createMashwaraService({io, mashwaraState, socketState, pushService, que
       emitToParticipant(recipient.socketId, 'mashwara_session_ended', payload);
     }
 
-    // 2. Push notification to immediately dismiss ringing heads-up notification on Android
+    // 2. Push notification to immediately dismiss ringing heads-up notification and show missed call alert on Android
     if (pushService && queryDb) {
       try {
         const rows = await queryDb(
@@ -449,8 +467,8 @@ function createMashwaraService({io, mashwaraState, socketState, pushService, que
         if (rows?.[0]?.device_id) {
           await pushService.sendPushToToken(
             rows[0].device_id,
-            'Call Cancelled',
-            'Mashwara call was cancelled',
+            'Missed Call',
+            `Missed Mashwara call from ${hostName}`,
             payload,
           );
         }
