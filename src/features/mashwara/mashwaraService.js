@@ -437,7 +437,6 @@ function createMashwaraService({io, mashwaraState, socketState, pushService, que
 
     if (recipient?.socketId) {
       emitToParticipant(recipient.socketId, 'incoming_mashwara_call', payload);
-      return;
     }
 
     if (!pushService || !queryDb) {
@@ -509,7 +508,8 @@ function createMashwaraService({io, mashwaraState, socketState, pushService, que
     }
 
     // 2. Push notification to immediately dismiss ringing heads-up notification and show missed call alert on Android
-    if (pushService && queryDb) {
+    // Only send missed call notification if not explicitly declined by participant
+    if (pushService && queryDb && reason !== 'declined') {
       try {
         const rows = await queryDb(
           'SELECT device_id FROM users WHERE id = ? LIMIT 1',
@@ -518,7 +518,7 @@ function createMashwaraService({io, mashwaraState, socketState, pushService, que
         if (rows?.[0]?.device_id) {
           await pushService.sendPushToToken(
             rows[0].device_id,
-            'Missed Call',
+            'Missed Mashwara Call',
             `Missed Mashwara call from ${hostName}`,
             payload,
           );
@@ -545,8 +545,9 @@ function createMashwaraService({io, mashwaraState, socketState, pushService, que
         const existing = getRoom(sessionId);
         if (existing && String(existing.hostUserId) === String(userId)) {
           cancelReconnectTimer(sessionId);
-          // If the call was already answered/active or reconnecting, update host socket and re-attach
-          if (existing.answeredAt || existing.participants.size > 0 || reconnectTimers.has(String(sessionId))) {
+          // If the call was already answered and remote participant is actively present, re-attach
+          const remoteParticipantPresent = existing.remoteUserId && existing.participants.has(String(existing.remoteUserId));
+          if (existing.answeredAt && remoteParticipantPresent) {
             let hostAvatar = data.avatar || data.image || null;
             if (!hostAvatar && queryDb && userId) {
               try {
@@ -572,7 +573,7 @@ function createMashwaraService({io, mashwaraState, socketState, pushService, que
               participants: getParticipantList(sessionId),
             });
           }
-          // Re-create/clean room so the host can re-call the user if it was never answered
+          // Re-create/clean room so the host can re-call the user if it was never answered or participant disconnected
           deleteRoom(sessionId);
         } else {
           return callback({

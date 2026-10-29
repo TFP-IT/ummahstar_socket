@@ -84,7 +84,9 @@ function createPushService({admin, firebaseReady}) {
       data.type === 'chat_message' ||
       data.type === 'call_missed' ||
       data.type === 'call_ended' ||
-      data.type === 'call_cancelled';
+      data.type === 'call_cancelled' ||
+      data.type === 'mashwara_call_cancelled' ||
+      data.type === 'mashwara_session_ended';
 
     if (!interceptNatively) {
       message.notification = {title, body};
@@ -99,7 +101,7 @@ function createPushService({admin, firebaseReady}) {
     } else {
       // For calls and call status updates, set specific high priority flags
       message.android.ttl = 0; // Deliver immediately
-      if (data.type === 'call_missed') {
+      if (data.type === 'call_missed' || data.type === 'mashwara_call_cancelled') {
         message.apns.payload.aps.alert = {title, body};
         message.apns.payload.aps.sound = 'default';
       }
