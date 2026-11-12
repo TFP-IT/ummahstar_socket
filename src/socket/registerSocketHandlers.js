@@ -233,7 +233,9 @@ function registerSocketHandlers({io, socketState, services}) {
             message.user_id,
           );
           const senderName =
-            String(message?.sender_name || '').trim() || 'New message';
+            (await messageService.fetchUserDisplayName(message.user_id)) ||
+            String(message?.sender_name || '').trim() ||
+            'New message';
           const pushBody = buildMessagePushBody(savedMessage);
 
           const encryptionKey =

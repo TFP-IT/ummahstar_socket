@@ -123,6 +123,26 @@ function createMessageService({queryDb}) {
     );
   }
 
+  async function fetchUserDisplayName(userId) {
+    if (!userId) return null;
+    try {
+      const rows = await queryDb(
+        `SELECT first_name, last_name, father_name FROM users WHERE id = ? LIMIT 1`,
+        [userId],
+      );
+      const user = rows[0];
+      if (!user) return null;
+      const name = [user.first_name, user.last_name, user.father_name]
+        .map(part => String(part || '').trim())
+        .filter(Boolean)
+        .join(' ');
+      return name || null;
+    } catch (error) {
+      console.error('Failed to fetch user display name:', error);
+      return null;
+    }
+  }
+
   async function updateConversationTimestamp(conversationId) {
     if (!conversationId) return;
 
@@ -203,6 +223,7 @@ function createMessageService({queryDb}) {
     fetchMessageSender,
     fetchConversationRecipients,
     fetchConversationEncryptionKey,
+    fetchUserDisplayName,
     updateConversationTimestamp,
     fetchMessageHistory,
   };
