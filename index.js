@@ -20,6 +20,7 @@ const {createMashwaraState} = require('./src/features/mashwara/mashwaraState');
 const {createLiveStreamService, createWorkers} = require('./src/features/liveStream/liveStreamService');
 const {createLiveStreamState} = require('./src/features/liveStream/liveStreamState');
 const {registerSocketHandlers} = require('./src/socket/registerSocketHandlers');
+const {createTokenVerifier, createAuthMiddleware, AUTH_MODE} = require('./src/socket/socketAuth');
 const {createHalaqaCronService} = require('./src/services/halaqaCronService');
 const {createMashwaraCronService} = require('./src/services/mashwaraCronService');
 
@@ -44,6 +45,9 @@ const db = createDbConnection(process.env);
 connectDb(db);
 
 const queryDb = createQueryDb(db);
+const verifyToken = createTokenVerifier(queryDb);
+io.use(createAuthMiddleware(verifyToken));
+console.log(`[socketAuth] mode: ${AUTH_MODE}`);
 const socketState = createSocketState();
 const firebase = initializeFirebase(__dirname);
 
@@ -80,6 +84,7 @@ services.callService = createCallService({
 });
 
 const mashwaraState = createMashwaraState();
+services.mashwaraState = mashwaraState;
 services.mashwaraService = createMashwaraService({
   io,
   mashwaraState,
@@ -109,6 +114,8 @@ registerSocketHandlers({
   io,
   socketState,
   services,
+  verifyToken,
+  queryDb,
 });
 
 
