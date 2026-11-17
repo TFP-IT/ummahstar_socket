@@ -23,6 +23,7 @@ const {registerSocketHandlers} = require('./src/socket/registerSocketHandlers');
 const {createTokenVerifier, createAuthMiddleware, AUTH_MODE} = require('./src/socket/socketAuth');
 const {createHalaqaCronService} = require('./src/services/halaqaCronService');
 const {createMashwaraCronService} = require('./src/services/mashwaraCronService');
+const {createNotificationPrefsService} = require('./src/services/notificationPrefsService');
 
 
 const app = express();
@@ -53,6 +54,7 @@ const firebase = initializeFirebase(__dirname);
 
 const services = {
   pushService: createPushService(firebase),
+  notificationPrefs: createNotificationPrefsService({queryDb}),
   uploadService: createUploadService({baseDir: __dirname}),
   messageService: createMessageService({queryDb}),
   callService: null,
@@ -64,11 +66,13 @@ const services = {
 services.halaqaCronService = createHalaqaCronService({
   queryDb,
   pushService: services.pushService,
+  notificationPrefs: services.notificationPrefs,
 });
 
 services.mashwaraCronService = createMashwaraCronService({
   queryDb,
   pushService: services.pushService,
+  notificationPrefs: services.notificationPrefs,
   io,
   socketState,
   reminderMinutes: [10, 5, 1, 0],

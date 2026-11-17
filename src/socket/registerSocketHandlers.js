@@ -110,6 +110,7 @@ function registerSocketHandlers({io, socketState, services, verifyToken, queryDb
     uploadService,
     qnaService,
     pushService,
+    notificationPrefs,
   } = services;
 
   function emitOnlineUsers() {
@@ -417,8 +418,19 @@ function registerSocketHandlers({io, socketState, services, verifyToken, queryDb
               message.conversation_id,
             )) || '';
 
+          // Notification Settings: skip users who muted SalaamBox or turned on Do Not Disturb.
+          const allowedRecipients = notificationPrefs
+            ? await notificationPrefs.filterAllowed(
+                recipients.map(recipient => recipient.id),
+                'salaambox',
+              )
+            : null;
+
           await Promise.all(
             recipients.map(async recipient => {
+              if (allowedRecipients && !allowedRecipients.has(Number(recipient.id))) {
+                return;
+              }
               if (
                 isUserActivelyViewingConversation(
                   recipient.id,
