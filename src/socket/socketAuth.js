@@ -17,7 +17,8 @@ const crypto = require('crypto');
 const AUTH_MODE = String(process.env.SOCKET_AUTH_MODE || 'compat').toLowerCase();
 const isEnforceMode = () => AUTH_MODE === 'enforce';
 
-const TOKEN_CACHE_TTL_MS = 5 * 60 * 1000;
+// Short, so a revoked token (logout, ban) stops working within a minute.
+const TOKEN_CACHE_TTL_MS = 60 * 1000;
 const tokenCache = new Map(); // rawToken -> {userId, expiresAt}
 
 function sha256Hex(value) {

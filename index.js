@@ -129,6 +129,11 @@ app.get('/', (req, res) => {
 });
 
 app.post('/api/media/presigned-url', async (req, res) => {
+  // Logged-in users only (Sanctum token in the Authorization header).
+  const userId = await verifyToken(req.headers.authorization).catch(() => null);
+  if (!userId) {
+    return res.status(401).json({success: false, error: 'Unauthorized'});
+  }
   try {
     const {fileName, messageType, fileType, uuid} = req.body;
     const result = await services.uploadService.generatePresignedUploadUrl({

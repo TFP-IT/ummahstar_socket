@@ -355,6 +355,16 @@ function registerSocketHandlers({io, socketState, services, verifyToken, queryDb
     });
 
     socket.on('get_presigned_url', async (data, callback) => {
+      // Upload URLs are for logged-in users only, in every auth mode.
+      if (!socket.data?.userId) {
+        const denied = {success: false, error: 'Unauthorized'};
+        if (typeof callback === 'function') {
+          callback(denied);
+        } else {
+          socket.emit('presigned_url_response', denied);
+        }
+        return;
+      }
       try {
         const {fileName, messageType, fileType, uuid} = data || {};
         const res = await uploadService.generatePresignedUploadUrl({
