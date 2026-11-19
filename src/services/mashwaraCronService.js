@@ -223,10 +223,18 @@ function createMashwaraCronService({
               // (skipped when the user muted Noor Access or turned on Do Not Disturb)
               if (reg.participant_device_id) {
                 allowNoorAccessPush(reg.participant_id)
-                  .then(allowed => allowed && pushService.sendPushToToken(reg.participant_device_id, pTitle, pBody, pData, {
-                    channelId: 'default',
-                  }))
+                  .then(allowed => {
+                    if (!allowed) {
+                      console.warn(`[MashwaraCron ⚠️] Participant ${reg.participant_id}: push skipped — Noor Access muted or Do Not Disturb on (user_settings).`);
+                      return;
+                    }
+                    return pushService.sendPushToToken(reg.participant_device_id, pTitle, pBody, pData, {
+                      channelId: 'default',
+                    });
+                  })
                   .catch(e => console.error('[MashwaraCron] Push error (participant):', e));
+              } else {
+                console.warn(`[MashwaraCron ⚠️] Participant ${reg.participant_id}: no device_id in users table — cannot send push for session ${reg.registration_id}.`);
               }
 
               // Realtime Socket notification if connected
@@ -277,10 +285,18 @@ function createMashwaraCronService({
               // (skipped when the user muted Noor Access or turned on Do Not Disturb)
               if (reg.host_device_id) {
                 allowNoorAccessPush(reg.host_id)
-                  .then(allowed => allowed && pushService.sendPushToToken(reg.host_device_id, hTitle, hBody, hData, {
-                    channelId: 'default',
-                  }))
+                  .then(allowed => {
+                    if (!allowed) {
+                      console.warn(`[MashwaraCron ⚠️] Host ${reg.host_id}: push skipped — Noor Access muted or Do Not Disturb on (user_settings).`);
+                      return;
+                    }
+                    return pushService.sendPushToToken(reg.host_device_id, hTitle, hBody, hData, {
+                      channelId: 'default',
+                    });
+                  })
                   .catch(e => console.error('[MashwaraCron] Push error (host):', e));
+              } else {
+                console.warn(`[MashwaraCron ⚠️] Host ${reg.host_id}: no device_id in users table — cannot send push for session ${reg.registration_id}.`);
               }
 
               // Realtime Socket notification if connected
