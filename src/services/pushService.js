@@ -27,6 +27,9 @@ function createPushService({admin, firebaseReady}) {
       Object.entries(data).reduce((entries, [key, value]) => {
         const normalizedKey = normalizeDataKey(key);
         if (!normalizedKey) return entries;
+        // FCM data must be strings; String(null) would send the literal
+        // "null", which the app then mistakes for a real image/value.
+        if (value === null || value === undefined) return entries;
 
         entries.push([normalizedKey, String(value)]);
         return entries;

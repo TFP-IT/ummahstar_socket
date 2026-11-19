@@ -388,6 +388,48 @@ function createMashwaraService({io, mashwaraState, socketState, pushService, que
     }
   }
 
+  /**
+   * The host's photo as shown on Mashwara cards: their Mashwara event-profile
+   * picture first, then the avatar the app sent, then users.image.
+   * Many hosts only set the event-profile picture, so reading users.image
+   * alone left the incoming-call screen with just an initial.
+   */
+  async function resolveHostAvatar(userId, clientAvatar = null) {
+    const isUsable = v => {
+      const s = String(v ?? '').trim();
+      return s !== '' && s !== 'null' && s !== 'undefined';
+    };
+
+    if (queryDb && userId) {
+      try {
+        const rows = await queryDb(
+          `SELECT u.image,
+                  (SELECT p.profile_picture
+                     FROM user_event_profiles p
+                    WHERE p.user_id = u.id
+                      AND p.event_type IN ('mashwara', 'livechat')
+                      AND p.deleted_at IS NULL
+                      AND p.profile_picture IS NOT NULL
+                      AND p.profile_picture <> ''
+                    ORDER BY p.id DESC
+                    LIMIT 1) AS event_picture
+             FROM users u
+            WHERE u.id = ?
+            LIMIT 1`,
+          [userId],
+        );
+        const row = rows?.[0];
+        if (isUsable(row?.event_picture)) return row.event_picture;
+        if (isUsable(clientAvatar)) return clientAvatar;
+        if (isUsable(row?.image)) return row.image;
+      } catch (e) {
+        console.error('[Mashwara] Failed to resolve host avatar from DB:', e);
+      }
+    }
+
+    return isUsable(clientAvatar) ? clientAvatar : null;
+  }
+
   async function notifyIncomingCall({sessionId, userId, displayName, remoteUserId, data = {}}) {
     if (!remoteUserId) {
       return;
@@ -397,17 +439,10 @@ function createMashwaraService({io, mashwaraState, socketState, pushService, que
       socketState.getOnlineUser(remoteUserId) ||
       socketState.getConnectedUser?.(remoteUserId);
 
-    let callerImage = data.avatar || data.image || data.userImage || null;
-    if (!callerImage && queryDb && userId) {
-      try {
-        const rows = await queryDb('SELECT image FROM users WHERE id = ? LIMIT 1', [userId]);
-        if (rows?.[0]?.image) {
-          callerImage = rows[0].image;
-        }
-      } catch (e) {
-        console.error('[Mashwara] Failed to resolve host image from DB:', e);
-      }
-    }
+    const callerImage = await resolveHostAvatar(
+      userId,
+      data.avatar || data.image || data.userImage || null,
+    );
 
     const payload = {
       sessionId: String(sessionId),
@@ -548,15 +583,7 @@ function createMashwaraService({io, mashwaraState, socketState, pushService, que
           // If the call was already answered and remote participant is actively present, re-attach
           const remoteParticipantPresent = existing.remoteUserId && existing.participants.has(String(existing.remoteUserId));
           if (existing.answeredAt && remoteParticipantPresent) {
-            let hostAvatar = data.avatar || data.image || null;
-            if (!hostAvatar && queryDb && userId) {
-              try {
-                const userRows = await queryDb('SELECT image FROM users WHERE id = ? LIMIT 1', [userId]);
-                if (userRows?.[0]?.image) {
-                  hostAvatar = userRows[0].image;
-                }
-              } catch (e) {}
-            }
+            const hostAvatar = await resolveHostAvatar(userId, data.avatar || data.image || null);
             addParticipant(sessionId, userId, {
               socketId: socket.id,
               displayName: displayName || 'Host',
@@ -599,15 +626,7 @@ function createMashwaraService({io, mashwaraState, socketState, pushService, que
       room.liveChatDate = data.liveChatDate || data.live_chat_date || null;
       room.liveChatStartTime = data.liveChatStartTime || data.live_chat_start_time || null;
       room.liveChatEndTime = data.liveChatEndTime || data.live_chat_end_time || null;
-      let hostAvatar = data.avatar || data.image || null;
-      if (!hostAvatar && queryDb && userId) {
-        try {
-          const userRows = await queryDb('SELECT image FROM users WHERE id = ? LIMIT 1', [userId]);
-          if (userRows?.[0]?.image) {
-            hostAvatar = userRows[0].image;
-          }
-        } catch (e) {}
-      }
+      const hostAvatar = await resolveHostAvatar(userId, data.avatar || data.image || null);
 
       addParticipant(sessionId, userId, {
         socketId: socket.id,
