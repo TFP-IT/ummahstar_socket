@@ -173,6 +173,8 @@ function createHalaqaCronService({ queryDb, pushService, notificationPrefs = nul
           eventId: String(eventId),
           eventType,
           minutesBefore: String(minutesBefore),
+          // Lets the app open the host or the attendee details screen on tap.
+          role: hostId && String(userId) === String(hostId) ? 'host' : 'participant',
         };
 
         console.log(`[HalaqaCron 🚀 PUSH SENT] Sending FCM push (${minutesBefore}m reminder) to user ${userId} for event "${title}"`);
