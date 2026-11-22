@@ -1,6 +1,6 @@
 const moment = require('moment');
 
-function createHalaqaCronService({ queryDb, pushService, reminderMinutes = [10, 5, 1] }) {
+function createHalaqaCronService({ queryDb, pushService, notificationPrefs = null, reminderMinutes = [10, 5, 1] }) {
   if (!queryDb || !pushService) {
     console.warn('[HalaqaCron] queryDb or pushService missing. Cron disabled.');
     return { stop: () => {} };
@@ -159,6 +159,12 @@ function createHalaqaCronService({ queryDb, pushService, reminderMinutes = [10, 
         }
 
         sentNotifications.add(dedupeKey);
+
+        // Notification Settings: Noor Access muted or Do Not Disturb on.
+        if (notificationPrefs && !(await notificationPrefs.isAllowed(userId, 'noor_access'))) {
+          console.log(`[HalaqaCron] Skipped user ${userId}: Noor Access notifications muted.`);
+          continue;
+        }
 
         const pushTitle = 'Live Halaqa Starting Soon!';
         const pushBody = `"${title}" will start in ${minutesBefore} minutes. Get ready to join!`;

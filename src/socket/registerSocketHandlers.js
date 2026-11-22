@@ -1,3 +1,66 @@
+const {
+  withVerifiedIdentity,
+  isEnforceMode,
+} = require('./socketAuth');
+
+/**
+ * Per-event security rules.
+ *  ids:          payload fields that identify the *sender*; they are replaced
+ *                with the token-verified user id so nobody can act as someone else.
+ *  conversation: payload field holding a conversation id the sender must belong to.
+ *  call:         payload field holding a 1:1 call id the sender must be part of.
+ *  mashwara:     payload field holding a Mashwara session id the sender must be
+ *                the host or the reserved guest of.
+ */
+const EVENT_RULES = {
+  join_room: {ids: ['user_id'], conversation: 'conversation_id'},
+  addUser: {ids: ['__self__']},
+  get_online_user: {ids: ['__self__']},
+  chat_screen_presence: {ids: ['user_id'], conversation: 'conversation_id'},
+
+  initiate_call: {ids: ['caller_id']},
+  answer_call: {ids: ['recipient_id'], call: 'callId'},
+  decline_call: {ids: ['recipient_id'], call: 'callId'},
+  end_call: {ids: ['user_id'], call: 'callId'},
+  webrtc_offer: {ids: ['sender_id'], call: 'callId'},
+  webrtc_answer: {ids: ['sender_id'], call: 'callId'},
+  webrtc_ice_candidate: {ids: ['sender_id'], call: 'callId'},
+  get_call_status: {call: 'callId'},
+  cleanup_my_calls: {ids: ['userId']},
+  debug_active_calls: {debugOnly: true},
+
+  upload_file: {conversation: 'conversation_id'},
+  send_message: {ids: ['user_id'], conversation: 'conversation_id'},
+  mark_message_delivered: {ids: ['userId'], conversation: 'conversationId'},
+  mark_message_read: {ids: ['userId'], conversation: 'conversationId'},
+  get_messages: {conversation: 'conversation_id'},
+  message_reaction: {ids: ['userId'], conversation: 'conversationId'},
+
+  mashwara_create_room: {ids: ['userId']},
+  mashwara_join_room: {ids: ['userId']},
+  mashwara_leave_room: {ids: ['userId'], mashwara: 'sessionId'},
+  mashwara_toggle_media: {ids: ['userId'], mashwara: 'sessionId'},
+  mashwara_signal: {ids: ['senderId'], mashwara: 'sessionId'},
+  mashwara_end_session: {ids: ['hostUserId']},
+  mashwara_decline_call: {ids: ['recipient_id'], mashwara: 'sessionId'},
+  mashwara_get_participants: {mashwara: 'sessionId'},
+  mashwara_register_user: {ids: ['userId']},
+
+  live_stream_create_room: {ids: ['userId']},
+  live_stream_join_room: {ids: ['userId']},
+  live_stream_leave_room: {ids: ['userId']},
+  live_stream_create_transport: {ids: ['userId']},
+  live_stream_produce: {ids: ['userId']},
+  live_stream_consume: {ids: ['userId']},
+  live_stream_toggle_media: {ids: ['userId']},
+  live_stream_raise_hand: {ids: ['userId']},
+  live_stream_chat_message: {ids: ['userId']},
+  live_stream_kick_participant: {ids: ['hostUserId']},
+  live_stream_end_session: {ids: ['hostUserId']},
+  live_stream_decline_call: {ids: ['recipient_id']},
+  live_stream_register_user: {ids: ['userId']},
+};
+
 function emitSocketError(socket, error, extra = {}) {
   socket.emit('message_error', {
     error,
@@ -28,7 +91,7 @@ function buildMessagePushBody(message) {
   }
 }
 
-function registerSocketHandlers({io, socketState, services}) {
+function registerSocketHandlers({io, socketState, services, verifyToken, queryDb}) {
   const {
     getOnlineUser,
     getOnlineUsersPayload,
@@ -47,6 +110,7 @@ function registerSocketHandlers({io, socketState, services}) {
     uploadService,
     qnaService,
     pushService,
+    notificationPrefs,
   } = services;
 
   function emitOnlineUsers() {
@@ -61,8 +125,119 @@ function registerSocketHandlers({io, socketState, services}) {
 
   callService.registerCleanupInterval();
 
+  async function isConversationParticipant(conversationId, userId) {
+    if (!queryDb) return true;
+    const rows = await queryDb(
+      'SELECT 1 FROM conversation_participants WHERE conversation_id = ? AND user_id = ? LIMIT 1',
+      [conversationId, userId],
+    );
+    return Array.isArray(rows) && rows.length > 0;
+  }
+
   io.on('connection', socket => {
     console.log(`Socket connected: ${socket.id}`);
+    socket.data = socket.data || {};
+    const conversationAccess = new Map(); // conversationId -> boolean
+
+    const rejectEvent = (event, args, reason) => {
+      const callback = args.find(arg => typeof arg === 'function');
+      const payload = {success: false, error: reason, message: reason, event};
+      if (callback) callback(payload);
+      socket.emit('auth_error', payload);
+    };
+
+    const canAccessConversation = async (conversationId, userId) => {
+      const key = String(conversationId);
+      if (conversationAccess.has(key)) return conversationAccess.get(key);
+      const allowed = await isConversationParticipant(conversationId, userId);
+      conversationAccess.set(key, allowed);
+      return allowed;
+    };
+
+    const canAccessMashwara = (sessionId, userId) => {
+      const state = services.mashwaraState;
+      const room = state && sessionId ? state.getRoom(String(sessionId)) : null;
+      if (!room) return true; // nothing to protect; the service handles "not found"
+      const uid = String(userId);
+      return (
+        uid === String(room.hostUserId) ||
+        (room.remoteUserId && uid === String(room.remoteUserId)) ||
+        room.participants.has(uid)
+      );
+    };
+
+    const canAccessCall = (callId, userId) => {
+      const call = callId ? socketState.activeCalls.get(callId) : null;
+      if (!call) return true; // the call service reports "not found" itself
+      return (call.participants || []).map(String).includes(String(userId));
+    };
+
+    // Wrap only the events listed in EVENT_RULES; everything else is untouched.
+    const rawOn = socket.on.bind(socket);
+    socket.on = (event, handler) => {
+      const rule = EVENT_RULES[event];
+      if (!rule) return rawOn(event, handler);
+
+      return rawOn(event, async (data, ...args) => {
+        try {
+          if (rule.debugOnly && process.env.SOCKET_DEBUG !== '1') {
+            return rejectEvent(event, args, 'Disabled');
+          }
+
+          const userId = socket.data.userId;
+          if (!userId) {
+            if (isEnforceMode()) {
+              return rejectEvent(event, args, 'Unauthorized');
+            }
+            return handler(data, ...args); // legacy client (compat mode)
+          }
+
+          const payload = withVerifiedIdentity(data, userId, rule.ids);
+          const source = data && typeof data === 'object' ? data : {};
+
+          if (rule.conversation) {
+            const conversationId = source[rule.conversation];
+            if (
+              conversationId &&
+              String(conversationId) !== '0' &&
+              !(await canAccessConversation(conversationId, userId))
+            ) {
+              return rejectEvent(event, args, 'Not a member of this conversation');
+            }
+          }
+          if (rule.call && !canAccessCall(source[rule.call], userId)) {
+            return rejectEvent(event, args, 'Not a participant of this call');
+          }
+          if (rule.mashwara && !canAccessMashwara(source[rule.mashwara], userId)) {
+            return rejectEvent(event, args, 'Not a participant of this Mashwara');
+          }
+
+          return handler(payload, ...args);
+        } catch (error) {
+          console.error(`[socketAuth] guard failed for ${event}:`, error.message);
+          return rejectEvent(event, args, 'Server error');
+        }
+      });
+    };
+
+    // Lets a socket that connected before login attach its token later.
+    rawOn('authenticate', async (data, callback) => {
+      let userId = null;
+      try {
+        userId = verifyToken ? await verifyToken(data && data.token) : null;
+      } catch (error) {
+        console.error('[socketAuth] authenticate failed:', error.message);
+      }
+      if (userId) {
+        if (socket.data.userId && socket.data.userId !== userId) {
+          conversationAccess.clear();
+        }
+        socket.data.userId = userId;
+      }
+      if (typeof callback === 'function') {
+        callback({success: Boolean(userId), userId: userId || null});
+      }
+    });
     
     // Dynamically grab liveStreamService because it initializes asynchronously
     const liveStreamService = services.liveStreamService;
@@ -180,6 +355,16 @@ function registerSocketHandlers({io, socketState, services}) {
     });
 
     socket.on('get_presigned_url', async (data, callback) => {
+      // Upload URLs are for logged-in users only, in every auth mode.
+      if (!socket.data?.userId) {
+        const denied = {success: false, error: 'Unauthorized'};
+        if (typeof callback === 'function') {
+          callback(denied);
+        } else {
+          socket.emit('presigned_url_response', denied);
+        }
+        return;
+      }
       try {
         const {fileName, messageType, fileType, uuid} = data || {};
         const res = await uploadService.generatePresignedUploadUrl({
@@ -243,8 +428,19 @@ function registerSocketHandlers({io, socketState, services}) {
               message.conversation_id,
             )) || '';
 
+          // Notification Settings: skip users who muted SalaamBox or turned on Do Not Disturb.
+          const allowedRecipients = notificationPrefs
+            ? await notificationPrefs.filterAllowed(
+                recipients.map(recipient => recipient.id),
+                'salaambox',
+              )
+            : null;
+
           await Promise.all(
             recipients.map(async recipient => {
+              if (allowedRecipients && !allowedRecipients.has(Number(recipient.id))) {
+                return;
+              }
               if (
                 isUserActivelyViewingConversation(
                   recipient.id,

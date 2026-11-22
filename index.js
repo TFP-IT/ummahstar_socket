@@ -20,8 +20,10 @@ const {createMashwaraState} = require('./src/features/mashwara/mashwaraState');
 const {createLiveStreamService, createWorkers} = require('./src/features/liveStream/liveStreamService');
 const {createLiveStreamState} = require('./src/features/liveStream/liveStreamState');
 const {registerSocketHandlers} = require('./src/socket/registerSocketHandlers');
+const {createTokenVerifier, createAuthMiddleware, AUTH_MODE} = require('./src/socket/socketAuth');
 const {createHalaqaCronService} = require('./src/services/halaqaCronService');
 const {createMashwaraCronService} = require('./src/services/mashwaraCronService');
+const {createNotificationPrefsService} = require('./src/services/notificationPrefsService');
 
 
 const app = express();
@@ -44,11 +46,15 @@ const db = createDbConnection(process.env);
 connectDb(db);
 
 const queryDb = createQueryDb(db);
+const verifyToken = createTokenVerifier(queryDb);
+io.use(createAuthMiddleware(verifyToken));
+console.log(`[socketAuth] mode: ${AUTH_MODE}`);
 const socketState = createSocketState();
 const firebase = initializeFirebase(__dirname);
 
 const services = {
   pushService: createPushService(firebase),
+  notificationPrefs: createNotificationPrefsService({queryDb}),
   uploadService: createUploadService({baseDir: __dirname}),
   messageService: createMessageService({queryDb}),
   callService: null,
@@ -60,11 +66,13 @@ const services = {
 services.halaqaCronService = createHalaqaCronService({
   queryDb,
   pushService: services.pushService,
+  notificationPrefs: services.notificationPrefs,
 });
 
 services.mashwaraCronService = createMashwaraCronService({
   queryDb,
   pushService: services.pushService,
+  notificationPrefs: services.notificationPrefs,
   io,
   socketState,
   reminderMinutes: [10, 5, 1, 0],
@@ -80,6 +88,7 @@ services.callService = createCallService({
 });
 
 const mashwaraState = createMashwaraState();
+services.mashwaraState = mashwaraState;
 services.mashwaraService = createMashwaraService({
   io,
   mashwaraState,
@@ -109,6 +118,8 @@ registerSocketHandlers({
   io,
   socketState,
   services,
+  verifyToken,
+  queryDb,
 });
 
 
@@ -118,6 +129,11 @@ app.get('/', (req, res) => {
 });
 
 app.post('/api/media/presigned-url', async (req, res) => {
+  // Logged-in users only (Sanctum token in the Authorization header).
+  const userId = await verifyToken(req.headers.authorization).catch(() => null);
+  if (!userId) {
+    return res.status(401).json({success: false, error: 'Unauthorized'});
+  }
   try {
     const {fileName, messageType, fileType, uuid} = req.body;
     const result = await services.uploadService.generatePresignedUploadUrl({

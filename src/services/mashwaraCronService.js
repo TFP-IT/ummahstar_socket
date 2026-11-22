@@ -3,6 +3,7 @@ const moment = require('moment');
 function createMashwaraCronService({
   queryDb,
   pushService,
+  notificationPrefs = null,
   io = null,
   socketState = null,
   reminderMinutes = [10, 5, 1, 0],
@@ -12,6 +13,10 @@ function createMashwaraCronService({
     console.warn('[MashwaraCron] queryDb or pushService missing. Mashwara reminder cron disabled.');
     return { stop: () => {}, checkAndSendReminders: async () => {} };
   }
+
+  // Notification Settings: Noor Access pushes respect the user's toggle / Do Not Disturb.
+  const allowNoorAccessPush = userId =>
+    notificationPrefs ? notificationPrefs.isAllowed(userId, 'noor_access') : Promise.resolve(true);
 
   // Track sent notifications: key format `mashwara_{registrationId}_{role}_{userId}_{targetMin}`
   const sentNotifications = new Set();
@@ -228,10 +233,21 @@ function createMashwaraCronService({
               console.log(`[MashwaraCron 🚀] Sending ${targetMin}m reminder to Participant (User ${reg.participant_id}) for session ${reg.registration_id}`);
 
               // Push notification via FCM
+              // (skipped when the user muted Noor Access or turned on Do Not Disturb)
               if (reg.participant_device_id) {
-                pushService.sendPushToToken(reg.participant_device_id, pTitle, pBody, pData, {
-                  channelId: 'default',
-                }).catch(e => console.error('[MashwaraCron] Push error (participant):', e));
+                allowNoorAccessPush(reg.participant_id)
+                  .then(allowed => {
+                    if (!allowed) {
+                      console.warn(`[MashwaraCron ⚠️] Participant ${reg.participant_id}: push skipped — Noor Access muted or Do Not Disturb on (user_settings).`);
+                      return;
+                    }
+                    return pushService.sendPushToToken(reg.participant_device_id, pTitle, pBody, pData, {
+                      channelId: 'default',
+                    });
+                  })
+                  .catch(e => console.error('[MashwaraCron] Push error (participant):', e));
+              } else {
+                console.warn(`[MashwaraCron ⚠️] Participant ${reg.participant_id}: no device_id in users table — cannot send push for session ${reg.registration_id}.`);
               }
 
               // Realtime Socket notification if connected
@@ -279,10 +295,21 @@ function createMashwaraCronService({
               console.log(`[MashwaraCron 🚀] Sending ${targetMin}m reminder to Host (User ${reg.host_id}) for session ${reg.registration_id}`);
 
               // Push notification via FCM
+              // (skipped when the user muted Noor Access or turned on Do Not Disturb)
               if (reg.host_device_id) {
-                pushService.sendPushToToken(reg.host_device_id, hTitle, hBody, hData, {
-                  channelId: 'default',
-                }).catch(e => console.error('[MashwaraCron] Push error (host):', e));
+                allowNoorAccessPush(reg.host_id)
+                  .then(allowed => {
+                    if (!allowed) {
+                      console.warn(`[MashwaraCron ⚠️] Host ${reg.host_id}: push skipped — Noor Access muted or Do Not Disturb on (user_settings).`);
+                      return;
+                    }
+                    return pushService.sendPushToToken(reg.host_device_id, hTitle, hBody, hData, {
+                      channelId: 'default',
+                    });
+                  })
+                  .catch(e => console.error('[MashwaraCron] Push error (host):', e));
+              } else {
+                console.warn(`[MashwaraCron ⚠️] Host ${reg.host_id}: no device_id in users table — cannot send push for session ${reg.registration_id}.`);
               }
 
               // Realtime Socket notification if connected

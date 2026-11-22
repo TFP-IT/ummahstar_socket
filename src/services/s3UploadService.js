@@ -244,8 +244,11 @@ function createS3UploadService({ baseDir }) {
       throw new Error('S3 is not configured on server');
     }
 
-    const fileExtension = path.extname(fileName || '');
-    const uniqueFileName = `${uuid || uuidv4()}${fileExtension}`;
+    // The caller's uuid decides the S3 key, so only accept a plain id;
+    // anything else could target another file's name.
+    const safeUuid = typeof uuid === 'string' && /^[A-Za-z0-9-]{8,64}$/.test(uuid) ? uuid : uuidv4();
+    const fileExtension = path.extname(fileName || '').replace(/[^A-Za-z0-9.]/g, '').slice(0, 10);
+    const uniqueFileName = `${safeUuid}${fileExtension}`;
     const folder = getFolderForType(messageType);
     const datePrefix = new Date().toISOString().slice(0, 7);
     const s3Key = `${rootFolder}/${folder}/${datePrefix}/${uniqueFileName}`;
