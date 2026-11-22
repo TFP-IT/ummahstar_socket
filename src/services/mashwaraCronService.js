@@ -24,16 +24,26 @@ function createMashwaraCronService({
     }
   }, 2 * 60 * 60 * 1000);
 
+  function fullName(parts, fallback) {
+    const name = parts
+      .map(part => String(part || '').trim())
+      .filter(Boolean)
+      .join(' ');
+    return name || fallback;
+  }
+
   function getNotificationContent({ targetMin, sessionTitle, participantName, hostName, isHost }) {
     const formattedTitle = sessionTitle || 'Mashwara Session';
-    const otherName = isHost ? participantName : hostName;
+    // Mashwara notices always name the user who booked the session, never the host.
+    // The host sees the booker's full name; the booker (participant) needs no name.
+    const withName = isHost ? ` with ${participantName}` : '';
 
     if (targetMin === 10) {
       return {
         title: 'Mashwara Session in 10 Minutes',
         body: isHost
-          ? `Your upcoming Mashwara session "${formattedTitle}" with ${otherName} will start in 10 minutes. Please get ready!`
-          : `Your Mashwara session "${formattedTitle}" with ${otherName} will start in 10 minutes. Get ready to join!`,
+          ? `Your upcoming Mashwara session "${formattedTitle}"${withName} will start in 10 minutes. Please get ready!`
+          : `Your Mashwara session "${formattedTitle}"${withName} will start in 10 minutes. Get ready to join!`,
       };
     }
 
@@ -41,8 +51,8 @@ function createMashwaraCronService({
       return {
         title: 'Mashwara Session in 5 Minutes',
         body: isHost
-          ? `Your upcoming Mashwara session "${formattedTitle}" with ${otherName} starts in 5 minutes. Please prepare to host.`
-          : `Your Mashwara session "${formattedTitle}" with ${otherName} starts in 5 minutes. Please be ready!`,
+          ? `Your upcoming Mashwara session "${formattedTitle}"${withName} starts in 5 minutes. Please prepare to host.`
+          : `Your Mashwara session "${formattedTitle}"${withName} starts in 5 minutes. Please be ready!`,
       };
     }
 
@@ -50,8 +60,8 @@ function createMashwaraCronService({
       return {
         title: 'Mashwara Session in 1 Minute',
         body: isHost
-          ? `Your Mashwara session "${formattedTitle}" with ${otherName} starts in 1 minute. Please open the app!`
-          : `Your Mashwara session "${formattedTitle}" with ${otherName} starts in 1 minute. Please prepare to join!`,
+          ? `Your Mashwara session "${formattedTitle}"${withName} starts in 1 minute. Please open the app!`
+          : `Your Mashwara session "${formattedTitle}"${withName} starts in 1 minute. Please prepare to join!`,
       };
     }
 
@@ -59,8 +69,8 @@ function createMashwaraCronService({
     return {
       title: 'Mashwara Session Starting Now!',
       body: isHost
-        ? `Your Mashwara session "${formattedTitle}" with ${otherName} is starting now! Tap to begin.`
-        : `Your Mashwara session "${formattedTitle}" with ${otherName} is starting now! Tap to join call.`,
+        ? `Your Mashwara session "${formattedTitle}"${withName} is starting now! Tap to begin.`
+        : `Your Mashwara session "${formattedTitle}"${withName} is starting now! Tap to join call.`,
     };
   }
 
@@ -105,10 +115,12 @@ function createMashwaraCronService({
           COALESCE(lc.star_id, lc.created_by_id) as host_id,
           u.first_name as participant_first_name,
           u.last_name as participant_last_name,
+          u.father_name as participant_father_name,
           u.username as participant_username,
           u.device_id as participant_device_id,
           h.first_name as host_first_name,
           h.last_name as host_last_name,
+          h.father_name as host_father_name,
           h.username as host_username,
           h.device_id as host_device_id
         FROM live_chat_registrations r
@@ -169,15 +181,16 @@ function createMashwaraCronService({
           continue;
         }
 
-        const participantName = [reg.participant_first_name, reg.participant_last_name]
-          .filter(Boolean)
-          .join(' ')
-          .trim() || reg.participant_username || 'Participant';
+        // Full name (first + last + father) so every Mashwara notice names the booker the same way.
+        const participantName = fullName(
+          [reg.participant_first_name, reg.participant_last_name, reg.participant_father_name],
+          reg.participant_username || 'Participant',
+        );
 
-        const hostName = [reg.host_first_name, reg.host_last_name]
-          .filter(Boolean)
-          .join(' ')
-          .trim() || reg.host_username || 'Consultant';
+        const hostName = fullName(
+          [reg.host_first_name, reg.host_last_name, reg.host_father_name],
+          reg.host_username || 'Consultant',
+        );
 
         for (const targetMin of reminderMinutes) {
           if (!matchesTargetInterval(diffSeconds, targetMin)) {
