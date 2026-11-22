@@ -151,10 +151,12 @@ function createMessageService({queryDb}) {
       await queryDb(
         `
           UPDATE conversations
-          SET updated_at = ?
+          SET last_message_at = ?, updated_at = ?
           WHERE id = ?
         `,
-        [now, conversationId],
+        // last_message_at orders the Salaam Box list; without it a socket-sent
+        // message never moved its conversation up (new chats sat at the bottom).
+        [now, now, conversationId],
       );
     } catch (error) {
       console.error('Failed to update conversation timestamp:', error);
