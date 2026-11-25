@@ -73,6 +73,7 @@ function createLiveStreamState() {
       userId: String(userId),
       socketId: info.socketId || null,
       displayName: info.displayName || 'User',
+      avatarUrl: info.avatarUrl || null,
       audioMuted: false,
       videoMuted: false,
       handRaised: false,

@@ -199,7 +199,7 @@ function createLiveStreamService({io, liveStreamState, socketState, pushService,
 
   // ── handle: host creates a new live-stream room ───────────────────────────
   async function handleCreateRoom(socket, data, callback) {
-    const {sessionId, userId, displayName, remoteUserId, sessionType = 'halaqa'} = data;
+    const {sessionId, userId, displayName, avatarUrl, remoteUserId, sessionType = 'halaqa'} = data;
 
     console.log('remoteUserId', remoteUserId);
 
@@ -254,6 +254,7 @@ function createLiveStreamService({io, liveStreamState, socketState, pushService,
       addParticipant(sessionId, userId, {
         socketId: socket.id,
         displayName: displayName || 'Host',
+        avatarUrl,
       });
 
       socket.join(sessionId);
@@ -317,7 +318,7 @@ function createLiveStreamService({io, liveStreamState, socketState, pushService,
 
   // ── handle: viewer / second peer joins the room ───────────────────────────
   async function handleJoinRoom(socket, data, callback) {
-    const {sessionId, userId, displayName} = data;
+    const {sessionId, userId, displayName, avatarUrl} = data;
 
     try {
       const room = getRoom(sessionId);
@@ -367,6 +368,7 @@ function createLiveStreamService({io, liveStreamState, socketState, pushService,
       addParticipant(sessionId, userId, {
         socketId: socket.id,
         displayName: displayName || 'Viewer',
+        avatarUrl,
       });
 
       socket.join(sessionId);
