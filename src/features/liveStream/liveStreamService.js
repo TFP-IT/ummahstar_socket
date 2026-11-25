@@ -105,6 +105,12 @@ const WEBRTC_TRANSPORT_OPTIONS = {
   iceConsentTimeout: 20,
 };
 
+// ─── HalaqaLive viewer limit ─────────────────────────────────────────────────
+// One room lives on one mediasoup worker (one CPU core) and the host video is
+// copied to every viewer, so cap viewers per room. Override with
+// HALAQA_MAX_VIEWERS in .env after load-testing the server.
+const HALAQA_MAX_VIEWERS = Number(process.env.HALAQA_MAX_VIEWERS || 100);
+
 // ─── Worker pool ──────────────────────────────────────────────────────────────
 let mediasoupWorkers = [];
 let workerIndex = 0;
@@ -212,10 +218,39 @@ function createLiveStreamService({io, liveStreamState, socketState, pushService,
         router = await worker.createRouter({mediaCodecs: MEDIA_CODECS});
       }
 
-      createRoom(sessionId, userId, router, {
+      const room = createRoom(sessionId, userId, router, {
         sessionType,
         remoteUserId,
       });
+
+      // Who is talking: mediasoup measures audio levels of every producer.
+      if (router) {
+        try {
+          const observer = await router.createAudioLevelObserver({
+            maxEntries: 1,
+            threshold: -60,
+            interval: 800,
+          });
+          observer.on('volumes', volumes => {
+            const top = volumes[0];
+            const owner = top && getProducer(sessionId, top.producer.id);
+            io.to(sessionId).emit('live_stream_active_speaker', {
+              sessionId,
+              userId: owner ? owner.userId : null,
+              volume: top ? top.volume : null,
+            });
+          });
+          observer.on('silence', () => {
+            io.to(sessionId).emit('live_stream_active_speaker', {
+              sessionId,
+              userId: null,
+            });
+          });
+          room.audioLevelObserver = observer;
+        } catch (e) {
+          console.error('[LiveStream] AudioLevelObserver failed:', e.message);
+        }
+      }
       addParticipant(sessionId, userId, {
         socketId: socket.id,
         displayName: displayName || 'Host',
@@ -304,6 +339,22 @@ function createLiveStreamService({io, liveStreamState, socketState, pushService,
           success: false,
           error: 'This Mashwara session is reserved for a different participant',
         });
+      }
+
+      if (!isMashwaraRoom && !isExistingParticipant) {
+        const viewerCount = Array.from(room.participants.keys()).filter(
+          id => id !== String(room.hostUserId),
+        ).length;
+        if (
+          String(room.hostUserId) !== normalizedUserId &&
+          viewerCount >= HALAQA_MAX_VIEWERS
+        ) {
+          return callback({
+            success: false,
+            error: 'This session is full. Please try again later.',
+            code: 'ROOM_FULL',
+          });
+        }
       }
 
       if (isMashwaraRoom && !isExistingParticipant && room.participants.size >= 2) {
@@ -448,6 +499,24 @@ function createLiveStreamService({io, liveStreamState, socketState, pushService,
         console.log(`[LiveStream] Producer ${producer.id} transport closed`);
       });
 
+      // Upload quality of the sender (0 = bad … 10 = perfect).
+      producer.on('score', scores => {
+        if (!Array.isArray(scores) || scores.length === 0) return;
+        socket.emit('live_stream_network_score', {
+          sessionId,
+          direction: 'send',
+          kind,
+          score: Math.min(...scores.map(sc => sc.score)),
+        });
+      });
+
+      const producerRoom = getRoom(sessionId);
+      if (kind === 'audio' && producerRoom && producerRoom.audioLevelObserver) {
+        producerRoom.audioLevelObserver
+          .addProducer({producerId: producer.id})
+          .catch(e => console.error('[LiveStream] observer addProducer:', e.message));
+      }
+
       addProducer(sessionId, userId, producer);
 
       // Notify all viewers in the room about new producer
@@ -493,6 +562,19 @@ function createLiveStreamService({io, liveStreamState, socketState, pushService,
 
       consumer.on('transportclose', () => {
         console.log(`[LiveStream] Consumer ${consumer.id} transport closed`);
+      });
+
+      // score: this viewer's download quality; producerScore: the sender's
+      // upload quality (0 = bad … 10 = perfect).
+      consumer.on('score', ({score, producerScore}) => {
+        socket.emit('live_stream_network_score', {
+          sessionId,
+          direction: 'recv',
+          kind: consumer.kind,
+          score,
+          producerScore,
+          producerId,
+        });
       });
       consumer.on('producerclose', () => {
         socket.emit('live_stream_producer_closed', {
