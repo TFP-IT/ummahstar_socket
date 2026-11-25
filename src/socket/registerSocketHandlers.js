@@ -774,6 +774,10 @@ function registerSocketHandlers({io, socketState, services, verifyToken, queryDb
         liveStreamService.handleKickParticipant(socket, data);
       });
 
+      socket.on('live_stream_set_speaker', data => {
+        liveStreamService.handleSetSpeaker(socket, data);
+      });
+
       socket.on('live_stream_end_session', data => {
         liveStreamService.handleEndSession(socket, data);
       });

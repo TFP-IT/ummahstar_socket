@@ -432,6 +432,16 @@ function createLiveStreamService({io, liveStreamState, socketState, pushService,
         return callback({success: false, error: 'Send transport not found'});
       }
 
+      // HalaqaLive: only the host publishes freely; a viewer may publish
+      // audio only after the host granted them the mic.
+      const room = getRoom(sessionId);
+      if (room && room.sessionType === 'halaqa' && String(room.hostUserId) !== String(userId)) {
+        const participant = room.participants.get(String(userId));
+        if (kind !== 'audio' || !participant || !participant.canSpeak) {
+          return callback({success: false, error: 'Host has not allowed you to speak'});
+        }
+      }
+
       const producer = await record.transport.produce({kind, rtpParameters, appData});
 
       producer.on('transportclose', () => {
@@ -614,6 +624,52 @@ function createLiveStreamService({io, liveStreamState, socketState, pushService,
     });
   }
 
+  // ── handle: host gives / takes a viewer's mic (HalaqaLive) ───────────────
+  function handleSetSpeaker(socket, data) {
+    const {sessionId, hostUserId, targetUserId, allowed} = data || {};
+
+    const room = getRoom(sessionId);
+    if (!room) return;
+
+    if (String(room.hostUserId) !== String(hostUserId)) {
+      return socket.emit('live_stream_error', {error: 'Only the host can manage speakers'});
+    }
+
+    const target = room.participants.get(String(targetUserId));
+    if (!target) return;
+
+    updateParticipant(sessionId, targetUserId, {
+      canSpeak: !!allowed,
+      audioMuted: true,
+      handRaised: allowed ? false : target.handRaised,
+    });
+
+    if (!allowed) {
+      // Stop the viewer's audio for everyone right away.
+      getProducersByUser(sessionId, targetUserId).forEach(p => {
+        try { p.producer.close(); } catch (_) {}
+        room.producers.delete(p.producer.id);
+        broadcastToRoom(sessionId, 'live_stream_producer_closed', {
+          sessionId,
+          producerId: p.producer.id,
+          userId: String(targetUserId),
+        });
+      });
+    }
+
+    if (target.socketId) {
+      io.to(target.socketId).emit('live_stream_speak_permission', {
+        sessionId,
+        allowed: !!allowed,
+      });
+    }
+
+    broadcastToRoom(sessionId, 'live_stream_participants_updated', {
+      sessionId,
+      participants: getRoomParticipantList(sessionId),
+    });
+  }
+
   // ── handle: participant leaves ────────────────────────────────────────────
   function handleLeaveRoom(socket, data) {
     const {sessionId, userId} = data;
@@ -775,6 +831,7 @@ function createLiveStreamService({io, liveStreamState, socketState, pushService,
     handleRaiseHand,
     handleChatMessage,
     handleKickParticipant,
+    handleSetSpeaker,
     handleLeaveRoom,
     handleEndSession,
     handleGetParticipants,
